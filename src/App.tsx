@@ -50,14 +50,13 @@ interface PatientNote {
 // 🛠️ PROFESSIONAL INTERACTION CHECKER (Direct RxNav API)
 // ==========================================
 
-// تم إزالة البروكسي للاعتماد على الاتصال المباشر السريع
 const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, currentMeds: PatientMedication[]) => {
-  // 1. التحقق من وجود كود للدواء الجديد
-  if (!newDrugCui) {
-    return { safe: true, message: `⚠️ تنبيه: الدواء (${newDrugName}) غير مكود دولياً. لا يمكن فحص التفاعلات له.` };
+  // 1. التحقق من صحة كود الدواء الجديد (يجب أن يكون رقمياً)
+  if (!newDrugCui || !/^\d+$/.test(newDrugCui)) {
+    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح للفحص الآلي.` };
   }
 
-  // 2. تجهيز القائمة: محاولة العثور على أكواد للأدوية القديمة
+  // 2. تجهيز القائمة: تجميع الأكواد الصالحة فقط
   const medCuis: string[] = [];
   const cuiToName: Record<string, string> = {};
 
@@ -67,7 +66,7 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     let cui = med.rx_cui;
 
     // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
-    if (!cui && med.active_ingredient) {
+    if ((!cui || cui === 'null') && med.active_ingredient) {
       try {
         const { data } = await supabase
           .from('drugs')
@@ -84,26 +83,32 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
       }
     }
 
-    if (cui) {
+    // إضافة الكود فقط إذا كان رقمياً
+    if (cui && /^\d+$/.test(cui)) {
       medCuis.push(cui);
       cuiToName[cui] = med.drug_name;
     }
   }
   
   if (medCuis.length === 0) {
-    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية للمقارنة)." };
+    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
   try {
-    // 3. استدعاء API التفاعلات مباشرة (Direct Call)
-    const allCuis = [newDrugCui, ...medCuis].join('+');
-    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuis}`;
+    // 3. بناء الرابط بطريقة قياسية (URLSearchParams)
+    // RxNav يتطلب أكواد مفصولة بمسافات، و URLSearchParams سيتولى التشفير
+    const allCuisList = [newDrugCui, ...medCuis].join(' ');
+    const queryParams = new URLSearchParams({
+        rxcuis: allCuisList,
+        // sources: 'ONCHigh' // يمكن تفعيل هذا لتقليل النتائج وعرض الخطير فقط
+    });
+
+    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?${queryParams.toString()}`;
     
-    // الاتصال المباشر بدون وسيط
     const response = await fetch(targetUrl);
     
     if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+        throw new Error(`API returned status: ${response.status}`);
     }
 
     const data = await response.json();
@@ -116,7 +121,7 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
             
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
-            // شرط: الدواء الجديد طرف في المشكلة
+            // التأكد أن الدواء الجديد طرف في المشكلة
             if (involvedDrugs.includes(newDrugCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
@@ -139,8 +144,9 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
 
   } catch (error) {
     console.error("RxNav API Error:", error);
-    // رسالة خطأ أوضح للمستخدم
-    return { safe: true, message: `تعذر الاتصال بخادم التفاعلات (${error instanceof Error ? error.message : "Network Error"}). يرجى التحقق من الإنترنت.` };
+    // رسالة واضحة للمستخدم
+    const errMsg = error instanceof Error ? error.message : "Network Error";
+    return { safe: true, message: `تعذر الاتصال بخادم التفاعلات (${errMsg}).` };
   }
 };
 
