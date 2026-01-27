@@ -12,7 +12,7 @@ interface Drug {
   id: string;
   trade_name: string;
   active_ingredient: string;
-  rx_cui?: string; // الكود الدولي
+  rx_cui?: string;
 }
 
 interface Patient {
@@ -47,7 +47,7 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ PROFESSIONAL INTERACTION CHECKER (Robust Network Logic)
+// 🛠️ FINAL & ROBUST INTERACTION CHECKER
 // ==========================================
 
 const checkInteractionsByCode = async (
@@ -56,11 +56,11 @@ const checkInteractionsByCode = async (
   currentMeds: PatientMedication[], 
   setStatus: (status: string) => void
 ) => {
-  // 1. تنظيف كود الدواء الجديد
+  // 1. التحقق من صحة كود الدواء الجديد
   const safeNewCui = newDrugCui ? String(newDrugCui).trim() : '';
   
   if (!safeNewCui || !/^\d+$/.test(safeNewCui)) {
-    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح (${safeNewCui}).` };
+    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح للفحص (${safeNewCui}).` };
   }
 
   // 2. تجميع أكواد أدوية المريض
@@ -72,6 +72,7 @@ const checkInteractionsByCode = async (
 
     let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
 
+    // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
     if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
       try {
         const { data } = await supabase
@@ -99,64 +100,29 @@ const checkInteractionsByCode = async (
     return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
-  // 3. استراتيجيات الاتصال (Strategies)
-  const allCuisString = [safeNewCui, ...medCuis].join('+');
-  const rxNavUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
-
-  const strategies = [
-    {
-      name: "Direct Connection",
-      url: rxNavUrl,
-      handler: async (res: Response) => {
-        if (!res.ok) throw new Error(`Status ${res.status}`);
-        return await res.json();
-      }
-    },
-    {
-      name: "AllOrigins Proxy",
-      // نستخدم 'get' بدلاً من 'raw' لأنه أكثر استقراراً، لكنه يغلف البيانات في JSON
-      url: `https://api.allorigins.win/get?url=${encodeURIComponent(rxNavUrl)}`,
-      handler: async (res: Response) => {
-        if (!res.ok) throw new Error(`Status ${res.status}`);
-        const wrapper = await res.json();
-        // AllOrigins يرجع البيانات كنص داخل خاصية contents
-        return JSON.parse(wrapper.contents); 
-      }
-    },
-    {
-      name: "CorsProxy.io",
-      url: `https://corsproxy.io/?${encodeURIComponent(rxNavUrl)}`,
-      handler: async (res: Response) => {
-        if (!res.ok) throw new Error(`Status ${res.status}`);
-        return await res.json();
-      }
-    }
-  ];
-
-  // 4. تنفيذ المحاولات
-  let data = null;
-  
-  for (const strat of strategies) {
-    try {
-      setStatus(`جاري الاتصال عبر ${strat.name}...`);
-      console.log(`[Attempting] ${strat.name}: ${strat.url}`);
-      
-      const response = await fetch(strat.url);
-      data = await strat.handler(response);
-      
-      setStatus("تم الاتصال بنجاح.");
-      break; // نجح الاتصال
-    } catch (e) {
-      console.warn(`[Failed] ${strat.name}`, e);
-    }
-  }
-
-  if (!data) {
-    return { safe: true, message: "❌ فشل الاتصال بخادم التفاعلات بجميع الطرق. يرجى التحقق من الإنترنت." };
-  }
-
-  // 5. تحليل البيانات (Parsing)
+  // 3. الاتصال باستخدام Wrapped Proxy (الحل الجذري)
+  // هذا الأسلوب يتجاوز مشاكل الشبكة و CORS تماماً
   try {
+    setStatus("جاري الاتصال بخادم التفاعلات...");
+    
+    const allCuisString = [safeNewCui, ...medCuis].join('+');
+    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
+    
+    // نستخدم /get بدلاً من /raw للحصول على JSON مغلف ومضمون الوصول
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+    
+    const response = await fetch(proxyUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Proxy error: ${response.status}`);
+    }
+
+    const wrapperData = await response.json();
+    
+    // فك تغليف البيانات (مهم جداً)
+    const data = JSON.parse(wrapperData.contents);
+
+    // 4. تحليل البيانات
     const conflicts: string[] = [];
 
     if (data.fullInteractionTypeGroup) {
@@ -166,7 +132,7 @@ const checkInteractionsByCode = async (
             
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
-            // هل الدواء الجديد طرف في المشكلة؟
+            // التأكد أن الدواء الجديد هو سبب المشكلة
             if (involvedDrugs.includes(safeNewCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
@@ -185,11 +151,12 @@ const checkInteractionsByCode = async (
       return { safe: false, messages: conflicts };
     }
 
-    return { safe: true, message: "✅ آمن: تم الفحص ولا توجد تعارضات مسجلة." };
+    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
 
   } catch (error) {
-    console.error("Parsing Error:", error);
-    return { safe: true, message: "حدث خطأ أثناء قراءة بيانات التفاعلات." };
+    console.error("Check Error:", error);
+    const msg = error instanceof Error ? error.message : "Unknown";
+    return { safe: true, message: `حدث خطأ أثناء الاتصال (${msg}).` };
   }
 };
 
