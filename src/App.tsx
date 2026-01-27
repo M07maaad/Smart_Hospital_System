@@ -47,7 +47,7 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ PROFESSIONAL INTERACTION CHECKER (Optimized Connection)
+// 🛠️ PROFESSIONAL INTERACTION CHECKER (Direct + Failover)
 // ==========================================
 
 const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, currentMeds: PatientMedication[]) => {
@@ -58,7 +58,7 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح (${safeNewCui}).` };
   }
 
-  // 2. تجميع أكواد أدوية المريض (الأرقام فقط وبدون تكرار)
+  // 2. تجميع أكواد أدوية المريض
   const medCuisSet = new Set<string>();
   const cuiToName: Record<string, string> = {};
 
@@ -68,7 +68,7 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
 
     // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
-    if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
+    if ((!cui || cui === 'null') && med.active_ingredient) {
       try {
         const { data } = await supabase
           .from('drugs')
@@ -81,11 +81,10 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
           cui = String(data[0].rx_cui).trim();
         }
       } catch (e) {
-        console.warn("Failed to lookup code for", med.drug_name);
+        // تجاهل الخطأ الصامت
       }
     }
 
-    // إضافة الكود فقط إذا كان رقمياً صحيحاً
     if (cui && /^\d+$/.test(cui) && cui !== safeNewCui) {
       medCuisSet.add(cui);
       cuiToName[cui] = med.drug_name;
@@ -94,32 +93,36 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
   
   const medCuis = Array.from(medCuisSet);
 
-  // لا يوجد ما نقارن به
   if (medCuis.length === 0) {
     return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
+  // 3. دالة مساعدة للاتصال (تستقبل الرابط وتعيد النتيجة)
+  const fetchInteractions = async (url: string) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Status ${response.status}`);
+    return await response.json();
+  };
+
   try {
-    // 3. بناء الرابط باستخدام URL Object لضمان التشفير الصحيح
-    const url = new URL("https://rxnav.nlm.nih.gov/REST/interaction/list.json");
-    // نضع جميع الأكواد مفصولة بمسافات (المكتبة ستقوم بتشفير المسافات تلقائياً)
-    const allCuisString = [safeNewCui, ...medCuis].join(' ');
+    // 4. المحاولة الأولى: اتصال مباشر (الأسرع والأدق)
+    // RxNav يتطلب مسافات بين الأكواد، سنستخدم + لتمثيل المسافة
+    const allCuisString = [safeNewCui, ...medCuis].join('+'); 
+    const directUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
     
-    url.searchParams.append("rxcuis", allCuisString);
-    url.searchParams.append("sources", "ONCHigh"); // التركيز على التفاعلات المؤكدة
-
-    console.log("Checking URL:", url.toString()); 
-
-    // 4. الاتصال المباشر (بدون Headers مخصصة لتجنب مشاكل CORS Preflight)
-    const response = await fetch(url.toString());
+    console.log("Attempting Direct Check:", directUrl);
     
-    if (!response.ok) {
-        // إذا فشل الاتصال، نحاول قراءة نص الخطأ إن وجد
-        const errText = await response.text().catch(() => response.statusText);
-        throw new Error(`Server returned ${response.status}: ${errText}`);
+    let data;
+    try {
+      data = await fetchInteractions(directUrl);
+    } catch (directError) {
+      console.warn("Direct connection failed, switching to proxy...", directError);
+      // 5. المحاولة الثانية: استخدام بروكسي بديل موثوق (Backup)
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
+      data = await fetchInteractions(proxyUrl);
     }
 
-    const data = await response.json();
+    // 6. تحليل البيانات
     const conflicts: string[] = [];
 
     if (data.fullInteractionTypeGroup) {
@@ -129,12 +132,11 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
             
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
-            // شرط: الدواء الجديد طرف في المشكلة
+            // هل الدواء الجديد طرف في المشكلة؟
             if (involvedDrugs.includes(safeNewCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
                
-               // معرفة اسم الدواء الآخر
                const otherCui = involvedDrugs.find((c: string) => c !== safeNewCui);
                const otherName = cuiToName[otherCui || ''] || 'دواء آخر';
 
@@ -152,10 +154,8 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
 
   } catch (error) {
-    console.error("RxNav Check Failed:", error);
-    const errMsg = error instanceof Error ? error.message : "Error";
-    // في حالة الفشل التام، نعطي رسالة واضحة
-    return { safe: true, message: `تعذر الاتصال بخادم التفاعلات (${errMsg}). يرجى التأكد من الإنترنت.` };
+    console.error("All interaction checks failed:", error);
+    return { safe: true, message: "تعذر الاتصال بخادم التفاعلات (يرجى التحقق من الإنترنت)." };
   }
 };
 
