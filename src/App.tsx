@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './lib/supabase';
 import { 
-  User, Lock, Activity, Users, FileText, Pill, 
-  AlertTriangle, Plus, Trash2, Search, FilePlus, 
+  User, Lock, Activity, Users, Pill, 
+  AlertTriangle, Plus, Trash2, Search, 
   Stethoscope, Thermometer, Heart, Droplet, 
-  ChevronRight, ArrowLeft, CheckCircle, X, Loader2
+  ChevronRight, ArrowLeft, X, Loader2
 } from 'lucide-react';
 
 // --- Types ---
@@ -46,33 +46,96 @@ interface PatientNote {
   note_text: string;
 }
 
-// --- Live Interaction Check Function ---
-const checkInteractionsLive = async (newDrugActiveIngredient: string, currentMeds: PatientMedication[]) => {
-  if (!newDrugActiveIngredient) return { safe: true, message: '' };
+// ==========================================
+// 🛠️ SMART INTERACTION CHECKER LOGIC
+// ==========================================
+
+// 1. قاموس تحويل الأسماء (مصر/بريطانيا -> أمريكا)
+const DRUG_SYNONYMS: Record<string, string> = {
+  "paracetamol": "acetaminophen",
+  "salbutamol": "albuterol",
+  "glibenclamide": "glyburide",
+  "frusemide": "furosemide",
+  "adrenaline": "epinephrine",
+  "noradrenaline": "norepinephrine",
+  "pethidine": "meperidine",
+  "amoxycillin": "amoxicillin"
+};
+
+// 2. دالة تنظيف اسم الدواء (حذف الأملاح والشوائب)
+const cleanDrugName = (rawName: string): string => {
+  if (!rawName) return "";
   
-  const searchTerm = newDrugActiveIngredient.split('+')[0].split('/')[0].trim();
+  // أخذ أول مادة فعالة فقط في حالة التركيبات
+  let name = rawName.toLowerCase().split('+')[0].split('/')[0].trim();
+
+  // قائمة الزوائد الكيميائية للحذف
+  const salts = [
+    " sodium", " potassium", " calcium", " hcl", " hydrochloride", 
+    " sulfate", " phosphate", " maleate", " tartrate", " succinate", 
+    " trihydrate", " dihydrate", " monohydrate", " acetate"
+  ];
+
+  salts.forEach(salt => {
+    if (name.endsWith(salt)) {
+      name = name.replace(salt, "").trim();
+    }
+  });
+
+  // التحقق من القاموس
+  if (DRUG_SYNONYMS[name]) {
+    return DRUG_SYNONYMS[name];
+  }
+
+  return name;
+};
+
+// 3. الدالة الرئيسية للفحص
+const checkInteractionsLive = async (newDrugActiveIngredient: string, currentMeds: PatientMedication[]) => {
+  if (!newDrugActiveIngredient || currentMeds.length === 0) return { safe: true, message: '' };
+  
+  const searchTerm = cleanDrugName(newDrugActiveIngredient);
+  console.log(`🔍 Checking interactions for: ${newDrugActiveIngredient} -> Cleaned: ${searchTerm}`);
 
   try {
+    // جلب البيانات من FDA
     const response = await fetch(`https://api.fda.gov/drug/label.json?search=openfda.substance_name:"${searchTerm}"&limit=1`);
     
-    if (!response.ok) return { safe: true, message: "⚠️ لم يتم العثور على بيانات تفاعلات عالمية لهذا الدواء." };
+    if (!response.ok) {
+      console.warn("FDA API not found for:", searchTerm);
+      return { safe: true, message: `⚠️ لم يتم العثور على بيانات عالمية للمادة (${searchTerm}). يرجى المراجعة اليدوية.` };
+    }
     
     const data = await response.json();
-    let interactionText = "";
-    
-    if (data.results && data.results[0].drug_interactions) {
-      interactionText = JSON.stringify(data.results[0].drug_interactions).toLowerCase();
-    } else if (data.results && data.results[0].warnings) {
-      interactionText = JSON.stringify(data.results[0].warnings).toLowerCase();
-    }
+    const result = data.results?.[0];
 
-    if (!interactionText) return { safe: true, message: "⚠️ لا توجد بيانات تفاعلات مسجلة." };
+    if (!result) return { safe: true, message: "⚠️ لا توجد بيانات تفاعلات مسجلة." };
+
+    // تجميع كل نصوص التحذيرات في نص واحد كبير للبحث
+    const sectionsToCheck = [
+      result.drug_interactions,
+      result.warnings,
+      result.boxed_warning,
+      result.contraindications,
+      result.precautions
+    ];
+
+    const fullText = sectionsToCheck.flat().join(" ").toLowerCase();
+
+    if (fullText.length < 50) return { safe: true, message: "⚠️ بيانات التفاعلات غير كافية." };
 
     const conflicts: string[] = [];
+
+    // مقارنة أدوية المريض بالنص المسترجع
     currentMeds.forEach(med => {
-      const medActive = med.active_ingredient ? med.active_ingredient.split('+')[0].trim().toLowerCase() : '';
-      if (medActive && interactionText.includes(medActive)) {
-        conflicts.push(`⚠️ تحذير: المادة الفعالة (${medActive}) في دواء المريض (${med.drug_name}) مذكورة في تحذيرات الدواء الجديد.`);
+      const patientDrugClean = cleanDrugName(med.active_ingredient);
+      
+      // البحث عن اسم دواء المريض داخل تحذيرات الدواء الجديد
+      // نستخدم Regex للبحث عن الكلمة كاملة لتجنب التشابه الجزئي
+      const regex = new RegExp(`\\b${patientDrugClean}\\b`, 'i');
+      
+      if (patientDrugClean.length > 3 && regex.test(fullText)) {
+        conflicts.push(`⛔ خطر: ${newDrugActiveIngredient} قد يتفاعل مع ${med.drug_name} (${med.active_ingredient})`);
       }
     });
 
@@ -80,13 +143,17 @@ const checkInteractionsLive = async (newDrugActiveIngredient: string, currentMed
       return { safe: false, messages: conflicts };
     }
 
-    return { safe: true, message: "✅ آمن: لم يتم العثور على تعارضات (Check Passed)." };
+    return { safe: true, message: "✅ آمن: لم يتم العثور على تعارضات معروفة." };
 
   } catch (error) {
     console.error("API Error:", error);
     return { safe: true, message: "تعذر الاتصال بخادم التفاعلات." };
   }
 };
+
+// ==========================================
+// END LOGIC
+// ==========================================
 
 // --- Main Component ---
 export default function SmartHospitalApp() {
@@ -110,7 +177,7 @@ export default function SmartHospitalApp() {
       setUser({ id: data.id, name: data.name });
       setView('dashboard');
     } catch (err) {
-      alert('خطأ في الاتصال');
+      alert('خطأ في الاتصال - تأكد من إعدادات Supabase');
     }
   };
 
@@ -335,6 +402,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
   useEffect(() => {
     if (searchTerm.length > 2) {
       const timer = setTimeout(async () => {
+        // استخدام ilike للبحث المرن في قاعدة البيانات
         const { data } = await supabase.from('drugs').select('*').ilike('trade_name', `%${searchTerm}%`).limit(10);
         if (data) setDrugsList(data);
       }, 400);
@@ -378,7 +446,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
           )}
         </div>
         {selectedDrug && <div><div className="p-3 bg-blue-50 text-blue-800 rounded text-sm mb-2"><strong>المادة الفعالة:</strong> {selectedDrug.active_ingredient}</div><input type="text" className="w-full border rounded-lg px-4 py-2" value={dose} onChange={e => setDose(e.target.value)} placeholder="الجرعة" /></div>}
-        {checking && <div className="text-sm text-blue-600 flex items-center gap-2"><Loader2 className="animate-spin" size={16}/> فحص التعارضات...</div>}
+        {checking && <div className="text-sm text-blue-600 flex items-center gap-2"><Loader2 className="animate-spin" size={16}/> فحص التعارضات مع FDA...</div>}
         {alert && !checking && <div className={`p-3 rounded text-sm ${alert.type === 'danger' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{Array.isArray(alert.msg) ? alert.msg.map((m, i) => <div key={i}>• {m}</div>) : alert.msg}</div>}
         <div className="flex justify-end gap-3"><button onClick={handleSubmit} disabled={alert?.type === 'danger' || !dose || checking} className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50">تأكيد</button></div>
       </div>
