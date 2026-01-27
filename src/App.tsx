@@ -4,7 +4,7 @@ import {
   User, Lock, Activity, Users, Pill, 
   AlertTriangle, Plus, Trash2, Search, 
   Stethoscope, Thermometer, Heart, Droplet, 
-  ChevronRight, ArrowLeft, X, Loader2, ShieldCheck, FileText, WifiOff
+  ChevronRight, ArrowLeft, X, Loader2, ShieldCheck, FileText
 } from 'lucide-react';
 
 // --- Types ---
@@ -47,7 +47,7 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ FINAL & ROBUST INTERACTION CHECKER
+// 🛠️ FINAL & ROBUST INTERACTION CHECKER (SERVER-SIDE PROXY)
 // ==========================================
 
 const checkInteractionsByCode = async (
@@ -56,37 +56,18 @@ const checkInteractionsByCode = async (
   currentMeds: PatientMedication[], 
   setStatus: (status: string) => void
 ) => {
-  // 1. التحقق من صحة كود الدواء الجديد
   const safeNewCui = newDrugCui ? String(newDrugCui).trim() : '';
   
   if (!safeNewCui || !/^\d+$/.test(safeNewCui)) {
-    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح للفحص (${safeNewCui}).` };
+    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير متوفر للفحص المباشر.` };
   }
 
-  // 2. تجميع أكواد أدوية المريض
   const medCuisSet = new Set<string>();
   const cuiToName: Record<string, string> = {};
 
   for (const med of currentMeds) {
     if (!med.is_active) continue;
-
     let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
-
-    // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
-    if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
-      try {
-        const { data } = await supabase
-          .from('drugs')
-          .select('rx_cui')
-          .ilike('active_ingredient', med.active_ingredient)
-          .not('rx_cui', 'is', null)
-          .limit(1);
-        
-        if (data && data.length > 0) {
-          cui = String(data[0].rx_cui).trim();
-        }
-      } catch (e) {}
-    }
 
     if (cui && /^\d+$/.test(cui) && cui !== safeNewCui) {
       medCuisSet.add(cui);
@@ -95,50 +76,35 @@ const checkInteractionsByCode = async (
   }
   
   const medCuis = Array.from(medCuisSet);
-
   if (medCuis.length === 0) {
-    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
+    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية للمقارنة)." };
   }
 
-  // 3. الاتصال باستخدام Wrapped Proxy (الحل الجذري)
-  // هذا الأسلوب يتجاوز مشاكل الشبكة و CORS تماماً
   try {
-    setStatus("جاري الاتصال بخادم التفاعلات...");
-    
+    setStatus("جاري الفحص عبر الخادم...");
     const allCuisString = [safeNewCui, ...medCuis].join('+');
-    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
     
-    // نستخدم /get بدلاً من /raw للحصول على JSON مغلف ومضمون الوصول
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-    
-    const response = await fetch(proxyUrl);
+    // ننادي الـ Serverless Function الخاصة بنا في Vercel
+    const response = await fetch(`/api/interaction-checker?rxcuis=${encodeURIComponent(allCuisString)}`);
     
     if (!response.ok) {
-      throw new Error(`Proxy error: ${response.status}`);
+      throw new Error(`خطأ في الاتصال بالخادم: ${response.status}`);
     }
 
-    const wrapperData = await response.json();
-    
-    // فك تغليف البيانات (مهم جداً)
-    const data = JSON.parse(wrapperData.contents);
-
-    // 4. تحليل البيانات
+    const data = await response.json();
     const conflicts: string[] = [];
 
     if (data.fullInteractionTypeGroup) {
       for (const group of data.fullInteractionTypeGroup) {
         for (const type of group.fullInteractionType) {
           for (const pair of type.interactionPair) {
-            
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
-            // التأكد أن الدواء الجديد هو سبب المشكلة
             if (involvedDrugs.includes(safeNewCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
-               
                const otherCui = involvedDrugs.find((c: string) => c !== safeNewCui);
-               const otherName = cuiToName[otherCui || ''] || 'دواء آخر';
+               const otherName = cuiToName[otherCui || ''] || 'دواء آخر في القائمة';
 
                conflicts.push(`${severity}: تعارض بين (${newDrugName}) و (${otherName}).\n📝 ${description}`);
             }
@@ -151,20 +117,19 @@ const checkInteractionsByCode = async (
       return { safe: false, messages: conflicts };
     }
 
-    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
+    return { safe: true, message: "✅ تم الفحص بنجاح: لا توجد تداخلات دوائية معروفة." };
 
-  } catch (error) {
+  } catch (error: any) {
     console.error("Check Error:", error);
-    const msg = error instanceof Error ? error.message : "Unknown";
-    return { safe: true, message: `حدث خطأ أثناء الاتصال (${msg}).` };
+    return { safe: true, message: `تعذر إتمام الفحص التلقائي (${error.message}). يرجى المراجعة الإكلينيكية.` };
   }
 };
 
 // ==========================================
-// MAIN APP LOGIC
+// MAIN APP COMPONENT
 // ==========================================
 
-export default function SmartHospitalApp() {
+export default function App() {
   const [view, setView] = useState<'login' | 'dashboard' | 'patient'>('login');
   const [user, setUser] = useState<{ id: string, name: string } | null>(null);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
@@ -185,7 +150,7 @@ export default function SmartHospitalApp() {
       setUser({ id: data.id, name: data.name });
       setView('dashboard');
     } catch (err) {
-      alert('خطأ في الاتصال');
+      alert('خطأ في الاتصال بقاعدة البيانات');
     }
   };
 
@@ -195,7 +160,6 @@ export default function SmartHospitalApp() {
       
       {view !== 'login' && user && (
         <div className="flex h-screen overflow-hidden">
-          {/* Sidebar */}
           <aside className="w-64 bg-slate-900 text-white hidden md:flex flex-col shadow-xl z-20">
             <div className="p-6 border-b border-slate-700 flex items-center gap-3 bg-slate-950">
               <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-500/20">
@@ -223,13 +187,12 @@ export default function SmartHospitalApp() {
                 </div>
                 <div>
                   <p className="text-sm font-bold text-slate-200">{user.name}</p>
-                  <p className="text-xs text-slate-500">Consultant</p>
+                  <p className="text-xs text-slate-500">طبيب استشاري</p>
                 </div>
               </div>
             </div>
           </aside>
 
-          {/* Main Content */}
           <main className="flex-1 overflow-auto bg-slate-50 relative">
             {view === 'dashboard' && (
               <DashboardView onSelectPatient={(p) => { setSelectedPatient(p); setView('patient'); }} />
@@ -249,7 +212,7 @@ export default function SmartHospitalApp() {
   );
 }
 
-// --- Sub Components ---
+// --- Views & Components ---
 
 function LoginView({ onLogin }: { onLogin: (code: string, pass: string) => void }) {
   const [code, setCode] = useState('');
@@ -265,25 +228,23 @@ function LoginView({ onLogin }: { onLogin: (code: string, pass: string) => void 
 
   return (
     <div className="flex items-center justify-center min-h-screen bg-slate-900 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-800 via-slate-900 to-black">
-      <div className="w-full max-w-md bg-white/10 backdrop-blur-md border border-white/10 rounded-2xl shadow-2xl overflow-hidden p-8">
-        <div className="text-center mb-8">
-          <div className="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-500/30">
-            <Activity size={32} className="text-white" />
-          </div>
-          <h2 className="text-3xl font-bold text-white mb-2">Smart Hospital</h2>
-          <p className="text-slate-400">تسجيل دخول الأطقم الطبية</p>
+      <div className="w-full max-w-md bg-white/10 backdrop-blur-md border border-white/10 rounded-2xl shadow-2xl overflow-hidden p-8 text-center">
+        <div className="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-500/30">
+          <Activity size={32} className="text-white" />
         </div>
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <h2 className="text-3xl font-bold text-white mb-2">Smart Hospital</h2>
+        <p className="text-slate-400 mb-8">نظام إدارة العناية المركزة الذكي</p>
+        <form onSubmit={handleSubmit} className="space-y-5 text-right">
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1.5">الكود الوظيفي</label>
+            <label className="block text-sm font-medium text-slate-300 mb-1.5">كود الطبيب</label>
             <div className="relative">
               <User className="absolute right-3 top-3 text-slate-500" size={18}/>
               <input 
                 type="text" 
                 value={code} 
                 onChange={(e) => setCode(e.target.value)} 
-                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg pr-10 pl-4 py-2.5 text-white placeholder-slate-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all" 
-                placeholder="Ex: DR-101" 
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg pr-10 pl-4 py-2.5 text-white outline-none focus:ring-2 focus:ring-blue-500 transition-all" 
+                placeholder="مثال: DR-101" 
                 required 
               />
             </div>
@@ -296,14 +257,14 @@ function LoginView({ onLogin }: { onLogin: (code: string, pass: string) => void 
                 type="password" 
                 value={pass} 
                 onChange={(e) => setPass(e.target.value)} 
-                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg pr-10 pl-4 py-2.5 text-white placeholder-slate-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all" 
+                className="w-full bg-slate-800/50 border border-slate-700 rounded-lg pr-10 pl-4 py-2.5 text-white outline-none focus:ring-2 focus:ring-blue-500 transition-all" 
                 placeholder="••••••" 
                 required 
               />
             </div>
           </div>
-          <button disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold flex justify-center transition-all shadow-lg shadow-blue-600/20 mt-4">
-            {loading ? <Loader2 className="animate-spin" /> : 'تسجيل الدخول'}
+          <button disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold flex justify-center transition-all shadow-lg mt-4 disabled:opacity-50">
+            {loading ? <Loader2 className="animate-spin" /> : 'دخول النظام'}
           </button>
         </form>
       </div>
@@ -331,11 +292,11 @@ function DashboardView({ onSelectPatient }: { onSelectPatient: (p: Patient) => v
       <header className="flex justify-between items-center mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">قائمة المرضى (In-Patients)</h1>
-          <p className="text-slate-500 text-sm mt-1">نظرة عامة على الحالات المسجلة حالياً</p>
+          <p className="text-slate-500 text-sm mt-1">إدارة حالات العناية المركزة</p>
         </div>
-        <span className="bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200 text-slate-600 font-medium">
-          العدد الكلي: {patients.length}
-        </span>
+        <div className="bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200 text-slate-600 font-bold">
+          الحالات الحالية: {patients.length}
+        </div>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -359,20 +320,18 @@ function DashboardView({ onSelectPatient }: { onSelectPatient: (p: Patient) => v
                 patient.status === 'Critical' ? 'bg-red-100 text-red-600' : 
                 patient.status === 'Stable' ? 'bg-green-100 text-green-600' : 'bg-blue-100 text-blue-600'
               }`}>
-                {patient.status}
+                {patient.status === 'Critical' ? 'حرجة' : patient.status === 'Stable' ? 'مستقرة' : 'تحسن'}
               </span>
             </div>
             
-            <div className="space-y-2 mb-4">
-              <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 p-2 rounded-lg">
-                 <Stethoscope size={16} className="text-slate-400 shrink-0" /> 
+            <div className="bg-slate-50 p-3 rounded-lg mb-4 text-sm text-slate-600 flex items-center gap-2">
+                 <Stethoscope size={16} className="text-blue-500 shrink-0" /> 
                  <span className="truncate">{patient.diagnosis}</span>
-              </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-100 flex justify-between items-center text-xs text-slate-500">
-              <span>دخول: {patient.admission_date}</span>
-              <span className="text-blue-600 font-medium flex items-center gap-1 group-hover:translate-x-[-2px] transition-transform">
+            <div className="pt-4 border-t border-slate-100 flex justify-between items-center text-xs text-slate-500 font-medium">
+              <span>تاريخ الدخول: {patient.admission_date}</span>
+              <span className="text-blue-600 flex items-center gap-1 group-hover:translate-x-[-4px] transition-transform">
                 عرض الملف <ChevronRight size={14} className="rotate-180"/>
               </span>
             </div>
@@ -388,7 +347,6 @@ function PatientDetailsView({ patient, currentUser, onBack }: { patient: Patient
 
   return (
     <div className="flex flex-col h-full bg-slate-50">
-      {/* Patient Header */}
       <header className="bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm">
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full text-slate-500 transition-colors">
@@ -396,25 +354,23 @@ function PatientDetailsView({ patient, currentUser, onBack }: { patient: Patient
           </button>
           <div>
             <h1 className="text-xl font-bold text-slate-800">{patient.name}</h1>
-            <div className="flex items-center gap-2 text-sm text-slate-500">
+            <div className="flex items-center gap-2 text-sm text-slate-500 font-medium">
               <span>{patient.gender === 'Male' ? 'ذكر' : 'أنثى'}</span>
-              <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
+              <span className="w-1.5 h-1.5 bg-slate-300 rounded-full"></span>
               <span>{patient.age} سنة</span>
-              <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
-              <span className="text-blue-600 font-bold bg-blue-50 px-2 rounded-md">{patient.room_number}</span>
+              <span className="w-1.5 h-1.5 bg-slate-300 rounded-full"></span>
+              <span className="text-blue-600 font-bold bg-blue-50 px-2 rounded">غرفة: {patient.room_number}</span>
             </div>
           </div>
         </div>
       </header>
 
-      {/* Tabs */}
       <div className="bg-white border-b border-slate-200 px-8 flex gap-8">
-        <TabButton label="نظرة عامة (Vitals)" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
-        <TabButton label="الأدوية والخطة العلاجية" active={activeTab === 'meds'} onClick={() => setActiveTab('meds')} />
-        <TabButton label="المتابعة والملاحظات" active={activeTab === 'notes'} onClick={() => setActiveTab('notes')} />
+        <TabButton label="المؤشرات الحيوية" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
+        <TabButton label="الأدوية وفحص التعارضات" active={activeTab === 'meds'} onClick={() => setActiveTab('meds')} />
+        <TabButton label="الملاحظات الطبية" active={activeTab === 'notes'} onClick={() => setActiveTab('notes')} />
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-auto p-8">
         <div className="max-w-6xl mx-auto">
           {activeTab === 'overview' && <OverviewTab patient={patient} />}
@@ -429,30 +385,30 @@ function PatientDetailsView({ patient, currentUser, onBack }: { patient: Patient
 function OverviewTab({ patient }: { patient: Patient }) {
   const vitals = patient.vitals || { hr: 0, bp: '--/--', temp: 0, spo2: 0 };
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
+    <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <VitalCard icon={<Heart className="text-rose-500" />} label="Heart Rate" value={vitals.hr} unit="bpm" color="rose" />
         <VitalCard icon={<Activity className="text-blue-500" />} label="Blood Pressure" value={vitals.bp} unit="mmHg" color="blue" />
-        <VitalCard icon={<Thermometer className="text-orange-500" />} label="Temperature" value={vitals.temp} unit="°C" color="orange" />
+        <VitalCard icon={<Thermometer className="text-orange-500" />} label="Temp" value={vitals.temp} unit="°C" color="orange" />
         <VitalCard icon={<Droplet className="text-cyan-500" />} label="SpO2" value={vitals.spo2} unit="%" color="cyan" />
       </div>
       
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-          <h3 className="font-bold text-lg mb-6 text-slate-800 flex items-center gap-2">
-            <FileText size={20} className="text-blue-600"/> البيانات الطبية
+          <h3 className="font-bold text-lg mb-6 text-slate-800 flex items-center gap-2 border-b pb-4">
+            <FileText size={20} className="text-blue-600"/> التاريخ الطبي للمريض
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div>
-              <span className="text-slate-400 text-xs uppercase font-bold tracking-wider mb-2 block">التشخيص الحالي</span>
-              <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl text-blue-900 font-medium">
+              <span className="text-slate-400 text-xs font-bold uppercase mb-3 block">التشخيص الحالي</span>
+              <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl text-blue-900 font-bold">
                 {patient.diagnosis}
               </div>
             </div>
             <div>
-              <span className="text-slate-400 text-xs uppercase font-bold tracking-wider mb-2 block">التاريخ المرضي (Medical History)</span>
+              <span className="text-slate-400 text-xs font-bold uppercase mb-3 block">الأمراض المزمنة</span>
               <div className="flex gap-2 flex-wrap">
                 {patient.medical_history?.map((h, i) => (
-                  <span key={i} className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-medium">
+                  <span key={i} className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-bold">
                     {h}
                   </span>
                 ))}
@@ -483,53 +439,53 @@ function MedicationsTab({ patient }: { patient: Patient }) {
   useEffect(() => { fetchMeds(); }, [patient.id]);
 
   const handleDelete = async (medId: string) => {
-    if(confirm('هل أنت متأكد من إيقاف هذا الدواء؟')) {
+    if(confirm('هل تريد إيقاف صرف هذا الدواء للمريض؟')) {
        await supabase.from('patient_medications').update({ is_active: false }).eq('id', medId);
        fetchMeds();
     }
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
+    <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
           <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
-            <Pill className="text-blue-600" /> الخطة العلاجية الحالية
+            <Pill className="text-blue-600" /> قائمة الأدوية الحالية
           </h3>
-          <p className="text-slate-500 text-sm">إدارة أدوية المريض وفحص التعارضات</p>
+          <p className="text-slate-500 text-sm">سيتم فحص التعارضات آلياً عند إضافة صنف جديد</p>
         </div>
         <button 
              onClick={() => setShowAddModal(true)}
-             className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl flex items-center gap-2 shadow-lg shadow-blue-600/20 transition-all active:scale-95"
+             className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl flex items-center gap-2 shadow-lg transition-all active:scale-95"
         >
-             <Plus size={18} /> إضافة دواء جديد
+             <Plus size={18} /> إضافة علاج جديد
         </button>
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         {loading ? <div className="p-8 text-center"><Loader2 className="animate-spin mx-auto text-blue-600"/></div> : (
         <table className="w-full text-right">
-          <thead className="bg-slate-50 text-slate-500 text-sm border-b border-slate-200">
+          <thead className="bg-slate-50 text-slate-500 text-xs font-bold border-b border-slate-200">
             <tr>
-              <th className="p-4 font-medium">اسم الدواء</th>
-              <th className="p-4 font-medium">الجرعة</th>
-              <th className="p-4 font-medium">المادة الفعالة</th>
-              <th className="p-4 font-medium">تاريخ البدء</th>
-              <th className="p-4 font-medium">إجراءات</th>
+              <th className="p-4">الاسم التجاري</th>
+              <th className="p-4">الجرعة</th>
+              <th className="p-4">المادة الفعالة</th>
+              <th className="p-4">تاريخ البدء</th>
+              <th className="p-4 text-center">إيقاف</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {currentMeds.length === 0 && (
-              <tr><td colSpan={5} className="p-8 text-center text-slate-400">لا توجد أدوية مسجلة</td></tr>
+              <tr><td colSpan={5} className="p-12 text-center text-slate-400 font-medium">لا توجد أدوية نشطة حالياً</td></tr>
             )}
             {currentMeds.map((med) => (
-              <tr key={med.id} className="hover:bg-blue-50/50 transition-colors group">
+              <tr key={med.id} className="hover:bg-blue-50/30 transition-colors">
                 <td className="p-4 font-bold text-slate-800">{med.drug_name}</td>
-                <td className="p-4"><span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-bold">{med.dose}</span></td>
+                <td className="p-4"><span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold">{med.dose}</span></td>
                 <td className="p-4 text-slate-500 text-sm">{med.active_ingredient}</td>
                 <td className="p-4 text-slate-500 text-sm">{med.start_date}</td>
-                <td className="p-4">
-                  <button onClick={() => handleDelete(med.id)} className="text-slate-400 hover:text-red-500 p-2 transition-colors"><Trash2 size={18} /></button>
+                <td className="p-4 text-center">
+                  <button onClick={() => handleDelete(med.id)} className="text-slate-300 hover:text-red-500 p-2 transition-colors"><Trash2 size={18} /></button>
                 </td>
               </tr>
             ))}
@@ -557,9 +513,8 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
   const [dose, setDose] = useState('');
   const [alert, setAlert] = useState<{ type: string, msg: string | string[] } | null>(null);
   const [checking, setChecking] = useState(false);
-  const [statusMsg, setStatusMsg] = useState(''); // حالة الاتصال
+  const [statusMsg, setStatusMsg] = useState('');
 
-  // البحث في Supabase (بالأسماء)
   useEffect(() => {
     if (searchTerm.length > 2) {
       const timer = setTimeout(async () => {
@@ -567,26 +522,23 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
           .from('drugs')
           .select('*')
           .ilike('trade_name', `%${searchTerm}%`)
-          .limit(10);
+          .limit(8);
         if (data) setDrugsList(data);
-      }, 400);
+      }, 300);
       return () => clearTimeout(timer);
     }
   }, [searchTerm]);
 
-  // عند اختيار دواء، نفحص التعارض فوراً
   useEffect(() => {
     if (selectedDrug) {
       const performCheck = async () => {
         setChecking(true);
         setAlert(null);
-        setStatusMsg("جاري الاتصال بخوادم التفاعلات...");
-        
         const result = await checkInteractionsByCode(
             selectedDrug.rx_cui || '', 
             selectedDrug.trade_name, 
             existingMeds,
-            setStatusMsg // تمرير دالة تحديث الحالة
+            setStatusMsg
         );
         
         if (!result.safe) {
@@ -609,51 +561,45 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
         dose: dose, 
         start_date: new Date().toISOString().split('T')[0], 
         is_active: true,
-        rx_cui: selectedDrug.rx_cui // تخزين الكود للمستقبل
+        rx_cui: selectedDrug.rx_cui
       });
 
-      if (error) {
-        alert("فشل في إضافة الدواء: " + error.message);
-      } else {
-        onSuccess();
-      }
+      if (!error) onSuccess();
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-        <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-          <h3 className="font-bold text-lg text-slate-800">إضافة دواء جديد</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors"><X size={20} /></button>
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+        <div className="p-5 border-b flex justify-between items-center bg-slate-50">
+          <h3 className="font-bold text-slate-800 text-lg">إضافة علاج جديد للخطة</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
         </div>
         
-        <div className="p-6 space-y-5">
-          {/* Search Input */}
+        <div className="p-6 space-y-5 text-right">
           <div className="relative">
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">اسم الدواء</label>
+            <label className="block text-sm font-bold text-slate-700 mb-2">اسم الدواء (تجاري)</label>
             <div className="relative">
               <Search className="absolute right-3 top-3 text-slate-400" size={18} />
               <input 
                 type="text" 
-                className="w-full border border-slate-300 rounded-xl pr-10 pl-4 py-3 text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                placeholder="ابحث بالاسم التجاري..."
+                className="w-full border rounded-xl pr-10 pl-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="ابحث عن دواء..."
                 value={searchTerm}
                 onChange={e => setSearchTerm(e.target.value)}
               />
             </div>
             
-            {/* Dropdown */}
             {searchTerm && !selectedDrug && drugsList.length > 0 && (
-              <div className="absolute top-full left-0 w-full bg-white border border-slate-200 shadow-xl mt-1 rounded-xl max-h-60 overflow-y-auto z-20">
+              <div className="absolute top-full right-0 w-full bg-white border shadow-xl mt-1 rounded-xl max-h-52 overflow-y-auto z-20">
                 {drugsList.map(drug => (
                   <div 
                     key={drug.id} 
-                    className="p-3 hover:bg-blue-50 cursor-pointer border-b border-slate-100 last:border-0 transition-colors" 
+                    className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-0" 
                     onClick={() => { setSelectedDrug(drug); setSearchTerm(drug.trade_name); setDrugsList([]); }}
                   >
                     <div className="font-bold text-slate-800 text-sm">{drug.trade_name}</div>
-                    <div className="text-xs text-slate-500 mt-0.5">{drug.active_ingredient}</div>
+                    <div className="text-xs text-slate-500">{drug.active_ingredient}</div>
                   </div>
                 ))}
               </div>
@@ -661,56 +607,55 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
           </div>
           
           {selectedDrug && (
-             <div className="space-y-4 animate-in slide-in-from-top-2">
+             <div className="space-y-4">
                 <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg text-sm">
-                   <div className="text-blue-800 font-bold mb-1">المادة الفعالة:</div>
-                   <div className="text-blue-600">{selectedDrug.active_ingredient}</div>
+                   <div className="text-blue-800 font-bold mb-1">المكونات الفعالة:</div>
+                   <div className="text-blue-700">{selectedDrug.active_ingredient}</div>
                 </div>
                 <div>
-                   <label className="block text-sm font-medium text-slate-700 mb-1.5">الجرعة الموصوفة</label>
+                   <label className="block text-sm font-bold text-slate-700 mb-2">الجرعة المحددة</label>
                    <input 
                      type="text" 
-                     className="w-full border border-slate-300 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none" 
+                     className="w-full border rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500" 
                      value={dose} 
                      onChange={e => setDose(e.target.value)} 
-                     placeholder="مثال: 500mg مرتين يومياً" 
+                     placeholder="مثال: 100mg مرتين يومياً بعد الأكل" 
                    />
                 </div>
              </div>
           )}
 
-          {/* Interaction Status */}
           {checking && (
-            <div className="flex flex-col items-center justify-center gap-2 py-3 text-blue-600 text-sm font-medium bg-blue-50/50 rounded-lg">
-              <div className="flex items-center gap-2"><Loader2 className="animate-spin" size={18}/> جاري فحص التعارضات...</div>
-              <div className="text-xs text-blue-400 font-normal">{statusMsg}</div>
+            <div className="p-4 bg-blue-50 rounded-xl text-blue-700 text-sm font-bold flex flex-col items-center gap-2">
+              <div className="flex items-center gap-2"><Loader2 className="animate-spin" size={18}/> جاري فحص التعارضات الدوائية...</div>
+              <div className="text-[10px] text-blue-400 uppercase tracking-widest">{statusMsg}</div>
             </div>
           )}
 
           {alert && !checking && (
-            <div className={`p-4 rounded-xl text-sm whitespace-pre-line leading-relaxed border ${
-              alert.type === 'danger' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-green-50 text-green-700 border-green-200'
+            <div className={`p-4 rounded-xl text-sm leading-relaxed border ${
+              alert.type === 'danger' ? 'bg-red-50 text-red-800 border-red-200' : 'bg-green-50 text-green-800 border-green-200'
             }`}>
               {Array.isArray(alert.msg) ? (
                 <div>
-                  <div className="font-bold mb-2 flex items-center gap-2"><AlertTriangle size={16}/> تم اكتشاف تعارضات:</div>
-                  {alert.msg.map((m, i) => <div key={i} className="mb-2 last:mb-0 pl-4 border-r-2 border-red-300">{m}</div>)}
+                  <div className="font-black mb-3 flex items-center gap-2 text-red-600"><AlertTriangle size={18}/> تنبيه: تعارضات خطيرة!</div>
+                  {alert.msg.map((m, i) => <div key={i} className="mb-3 last:mb-0 pr-4 border-r-4 border-red-400 bg-white/50 p-2 rounded">{m}</div>)}
                 </div>
               ) : (
-                <div className="flex items-center gap-2 font-medium"><ShieldCheck size={18}/> {alert.msg}</div>
+                <div className="flex items-center gap-2 font-bold"><ShieldCheck size={18} className="text-green-600"/> {alert.msg}</div>
               )}
             </div>
           )}
         </div>
 
-        <div className="p-5 border-t border-slate-100 flex justify-end gap-3 bg-slate-50/50">
-          <button onClick={onClose} className="px-5 py-2.5 text-slate-600 hover:bg-slate-200 rounded-xl font-medium transition-colors">إلغاء</button>
+        <div className="p-5 border-t flex justify-end gap-3 bg-slate-50">
+          <button onClick={onClose} className="px-5 py-2.5 text-slate-500 font-bold hover:bg-slate-200 rounded-xl transition-colors">إلغاء</button>
           <button 
             onClick={handleSubmit} 
             disabled={alert?.type === 'danger' || !dose || checking} 
-            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-600/20"
+            className="px-8 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-black disabled:opacity-40 shadow-lg"
           >
-            تأكيد الإضافة
+            حفظ العلاج
           </button>
         </div>
       </div>
@@ -730,7 +675,7 @@ function NotesTab({ patientId, doctorName }: { patientId: string, doctorName: st
   useEffect(() => { fetchNotes(); }, [patientId]);
   
   const saveNote = async () => { 
-    if(!newNote) return; 
+    if(!newNote.trim()) return; 
     await supabase.from('patient_notes').insert({ patient_id: patientId, doctor_name: doctorName, note_text: newNote }); 
     setNewNote(''); 
     fetchNotes(); 
@@ -738,30 +683,30 @@ function NotesTab({ patientId, doctorName }: { patientId: string, doctorName: st
 
   return (
     <div className="space-y-6">
-      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
         <textarea 
-          className="w-full border border-slate-200 rounded-xl p-4 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none" 
-          rows={3} 
-          placeholder="اكتب ملاحظات المرور اليومي هنا..." 
+          className="w-full border rounded-xl p-4 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all" 
+          rows={4} 
+          placeholder="أدخل ملاحظات المرور الطبي أو التقدم في الحالة..." 
           value={newNote} 
           onChange={e => setNewNote(e.target.value)}
         ></textarea>
-        <div className="flex justify-end mt-3">
-          <button onClick={saveNote} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors">حفظ الملاحظة</button>
+        <div className="flex justify-end mt-4">
+          <button onClick={saveNote} className="bg-slate-900 text-white px-8 py-2.5 rounded-xl font-bold hover:bg-slate-800 shadow-md">إضافة ملاحظة</button>
         </div>
       </div>
       <div className="space-y-4">
-        {notes.length === 0 && <p className="text-center text-slate-400 py-4">لا توجد ملاحظات سابقة</p>}
+        {notes.length === 0 && <p className="text-center text-slate-400 py-10 font-medium border-2 border-dashed rounded-2xl">لا توجد سجلات متابعة سابقة لهذا المريض</p>}
         {notes.map(note => (
-          <div key={note.id} className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm relative group hover:border-blue-200 transition-colors">
-             <div className="flex items-center gap-3 mb-3">
-               <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">DR</div>
+          <div key={note.id} className="bg-white p-5 rounded-2xl border shadow-sm flex flex-col gap-3">
+             <div className="flex items-center gap-3">
+               <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center text-white font-black text-xs">DR</div>
                <div>
-                 <div className="text-sm font-bold text-slate-800">{note.doctor_name}</div>
-                 <div className="text-xs text-slate-400">{new Date(note.created_at).toLocaleDateString()}</div>
+                 <div className="text-sm font-black text-slate-800">{note.doctor_name}</div>
+                 <div className="text-[10px] text-slate-400 font-bold uppercase">{new Date(note.created_at).toLocaleString('ar-EG')}</div>
                </div>
              </div>
-             <p className="text-slate-600 text-sm leading-relaxed pr-11">{note.note_text}</p>
+             <p className="text-slate-700 text-sm leading-relaxed pr-2 border-r-2 border-blue-100">{note.note_text}</p>
           </div>
         ))}
       </div>
@@ -770,7 +715,7 @@ function NotesTab({ patientId, doctorName }: { patientId: string, doctorName: st
 }
 
 function VitalCard({ icon, label, value, unit, color }: any) {
-  const colorClasses: Record<string, string> = {
+  const colors: Record<string, string> = {
     rose: "bg-rose-50 text-rose-600 border-rose-100",
     blue: "bg-blue-50 text-blue-600 border-blue-100",
     orange: "bg-orange-50 text-orange-600 border-orange-100",
@@ -778,10 +723,11 @@ function VitalCard({ icon, label, value, unit, color }: any) {
   };
 
   return (
-    <div className={`p-5 rounded-2xl border shadow-sm flex flex-col items-center text-center transition-transform hover:-translate-y-1 duration-300 ${colorClasses[color]}`}>
-      <div className="mb-3 opacity-90 p-2 bg-white/50 rounded-full">{icon}</div>
-      <div className="text-3xl font-black">{value} <span className="text-xs font-medium opacity-60 uppercase">{unit}</span></div>
-      <div className="text-xs font-bold uppercase tracking-wider mt-1 opacity-70">{label}</div>
+    <div className={`p-6 rounded-3xl border shadow-sm flex flex-col items-center transition-all hover:shadow-lg ${colors[color]}`}>
+      <div className="mb-3 p-3 bg-white/60 rounded-2xl shadow-inner">{icon}</div>
+      <div className="text-3xl font-black mb-1">{value}</div>
+      <div className="text-[10px] font-bold uppercase tracking-widest opacity-60 mb-1">{unit}</div>
+      <div className="text-[11px] font-black text-slate-900/60">{label}</div>
     </div>
   );
 }
@@ -790,8 +736,8 @@ function TabButton({ label, active, onClick }: any) {
   return (
     <button 
       onClick={onClick} 
-      className={`py-4 px-4 border-b-[3px] font-bold text-sm transition-all ${
-        active ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50 rounded-t-lg'
+      className={`py-5 px-2 border-b-4 font-black text-sm transition-all ${
+        active ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-600'
       }`}
     >
       {label}
