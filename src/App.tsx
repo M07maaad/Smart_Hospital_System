@@ -4,7 +4,7 @@ import {
   User, Lock, Activity, Users, Pill, 
   AlertTriangle, Plus, Trash2, Search, 
   Stethoscope, Thermometer, Heart, Droplet, 
-  ChevronRight, ArrowLeft, X, Loader2
+  ChevronRight, ArrowLeft, X, Loader2, ShieldCheck
 } from 'lucide-react';
 
 // --- Types ---
@@ -37,6 +37,7 @@ interface PatientMedication {
   start_date: string;
   active_ingredient: string;
   is_active: boolean;
+  rx_cui?: string; // تخزين كود RxNorm للدواء
 }
 
 interface PatientNote {
@@ -47,107 +48,130 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ SMART INTERACTION CHECKER LOGIC
+// 🛠️ PROFESSIONAL INTERACTION CHECKER (RxNav API)
 // ==========================================
 
-// 1. قاموس تحويل الأسماء (مصر/بريطانيا -> أمريكا)
-const DRUG_SYNONYMS: Record<string, string> = {
+// 1. قاموس لتصحيح الأسماء المصرية لتتوافق مع المعايير الأمريكية
+const DRUG_NAME_MAPPING: Record<string, string> = {
   "paracetamol": "acetaminophen",
-  "salbutamol": "albuterol",
-  "glibenclamide": "glyburide",
+  "amoxycillin": "amoxicillin",
+  "amoxicillin+clavulanic acid": "amoxicillin / clavulanate",
+  "amoxicillin + clavulanic acid": "amoxicillin / clavulanate",
+  "sulphamethoxazole": "sulfamethoxazole",
   "frusemide": "furosemide",
   "adrenaline": "epinephrine",
   "noradrenaline": "norepinephrine",
   "pethidine": "meperidine",
-  "amoxycillin": "amoxicillin"
+  "glibenclamide": "glyburide",
+  "salbutamol": "albuterol",
+  "diclofenac potassium": "diclofenac",
+  "diclofenac sodium": "diclofenac",
+  "warfarin sodium": "warfarin"
 };
 
-// 2. دالة تنظيف اسم الدواء (حذف الأملاح والشوائب)
-const cleanDrugName = (rawName: string): string => {
-  if (!rawName) return "";
+// 2. دالة الحصول على كود RxNorm (الهوية الرقمية للدواء)
+const getRxCui = async (drugName: string): Promise<string | null> => {
+  if (!drugName) return null;
+
+  // تنظيف الاسم
+  let cleanName = drugName.toLowerCase().trim();
   
-  // أخذ أول مادة فعالة فقط في حالة التركيبات
-  let name = rawName.toLowerCase().split('+')[0].split('/')[0].trim();
-
-  // قائمة الزوائد الكيميائية للحذف
-  const salts = [
-    " sodium", " potassium", " calcium", " hcl", " hydrochloride", 
-    " sulfate", " phosphate", " maleate", " tartrate", " succinate", 
-    " trihydrate", " dihydrate", " monohydrate", " acetate"
-  ];
-
-  salts.forEach(salt => {
-    if (name.endsWith(salt)) {
-      name = name.replace(salt, "").trim();
-    }
-  });
-
-  // التحقق من القاموس
-  if (DRUG_SYNONYMS[name]) {
-    return DRUG_SYNONYMS[name];
+  // معالجة الأسماء المركبة (Active Ingredients)
+  if (cleanName.includes('+')) {
+     // RxNav يفهم التركيبات بشرط استخدام " / " بدلاً من "+"
+     // ولكن للأمان سنأخذ المادة الأولى الفعالة للبحث عن التعارضات الأساسية
+     // أو نحاول البحث عن التركيبة كاملة إذا كانت مدعومة
+     cleanName = cleanName.split('+')[0].trim(); 
   }
 
-  return name;
-};
-
-// 3. الدالة الرئيسية للفحص
-const checkInteractionsLive = async (newDrugActiveIngredient: string, currentMeds: PatientMedication[]) => {
-  if (!newDrugActiveIngredient || currentMeds.length === 0) return { safe: true, message: '' };
+  // إزالة التراكيز والأشكال الصيدلية
+  cleanName = cleanName.replace(/\d+(\.\d+)?\s*(mg|g|ml|mcg|iu)/g, '').trim();
   
-  const searchTerm = cleanDrugName(newDrugActiveIngredient);
-  console.log(`🔍 Checking interactions for: ${newDrugActiveIngredient} -> Cleaned: ${searchTerm}`);
+  // استخدام القاموس
+  if (DRUG_NAME_MAPPING[cleanName]) {
+    cleanName = DRUG_NAME_MAPPING[cleanName];
+  }
 
   try {
-    // جلب البيانات من FDA
-    const response = await fetch(`https://api.fda.gov/drug/label.json?search=openfda.substance_name:"${searchTerm}"&limit=1`);
-    
-    if (!response.ok) {
-      console.warn("FDA API not found for:", searchTerm);
-      return { safe: true, message: `⚠️ لم يتم العثور على بيانات عالمية للمادة (${searchTerm}). يرجى المراجعة اليدوية.` };
-    }
-    
+    const response = await fetch(`https://rxnav.nlm.nih.gov/REST/rxcui.json?name=${encodeURIComponent(cleanName)}`);
     const data = await response.json();
-    const result = data.results?.[0];
+    if (data.idGroup && data.idGroup.rxnormId) {
+      return data.idGroup.rxnormId[0]; // إرجاع أول كود يتم العثور عليه
+    }
+    return null;
+  } catch (error) {
+    console.error("Error fetching RxCUI:", error);
+    return null;
+  }
+};
 
-    if (!result) return { safe: true, message: "⚠️ لا توجد بيانات تفاعلات مسجلة." };
+// 3. الدالة الرئيسية للفحص باستخدام الأكواد (Interaction API)
+const checkInteractionsRxNav = async (newDrugName: string, currentMeds: PatientMedication[]) => {
+  if (!newDrugName || currentMeds.length === 0) return { safe: true, message: '' };
 
-    // تجميع كل نصوص التحذيرات في نص واحد كبير للبحث
-    const sectionsToCheck = [
-      result.drug_interactions,
-      result.warnings,
-      result.boxed_warning,
-      result.contraindications,
-      result.precautions
-    ];
+  // 1. الحصول على كود الدواء الجديد
+  const newDrugCui = await getRxCui(newDrugName);
+  
+  if (!newDrugCui) {
+    return { safe: true, message: `⚠️ تنبيه: لم يتم التعرف على الكود الدولي للمادة (${newDrugName}). يرجى المراجعة اليدوية.` };
+  }
 
-    const fullText = sectionsToCheck.flat().join(" ").toLowerCase();
+  // 2. تجهيز قائمة أكواد أدوية المريض الحالية
+  // سنقوم بجلب الأكواد الحالية (في تطبيق حقيقي يفضل تخزين الكود في الداتا بيز عند الإضافة لتوفير هذا الاستدعاء)
+  const medCuis: string[] = [];
+  const cuiToName: Record<string, string> = {};
 
-    if (fullText.length < 50) return { safe: true, message: "⚠️ بيانات التفاعلات غير كافية." };
+  for (const med of currentMeds) {
+    const cui = await getRxCui(med.active_ingredient);
+    if (cui) {
+      medCuis.push(cui);
+      cuiToName[cui] = med.drug_name;
+    }
+  }
+
+  if (medCuis.length === 0) return { safe: true, message: "✅ آمن (لم يتم العثور على أدوية مقابلة للفحص)." };
+
+  try {
+    // 3. استدعاء API التعارضات (فحص الدواء الجديد ضد القائمة)
+    // الصيغة: interaction/list.json?rxcuis=CODE1+CODE2+CODE3...
+    const allCuis = [newDrugCui, ...medCuis].join('+');
+    const response = await fetch(`https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuis}`);
+    const data = await response.json();
 
     const conflicts: string[] = [];
 
-    // مقارنة أدوية المريض بالنص المسترجع
-    currentMeds.forEach(med => {
-      const patientDrugClean = cleanDrugName(med.active_ingredient);
-      
-      // البحث عن اسم دواء المريض داخل تحذيرات الدواء الجديد
-      // نستخدم Regex للبحث عن الكلمة كاملة لتجنب التشابه الجزئي
-      const regex = new RegExp(`\\b${patientDrugClean}\\b`, 'i');
-      
-      if (patientDrugClean.length > 3 && regex.test(fullText)) {
-        conflicts.push(`⛔ خطر: ${newDrugActiveIngredient} قد يتفاعل مع ${med.drug_name} (${med.active_ingredient})`);
+    if (data.fullInteractionTypeGroup) {
+      for (const group of data.fullInteractionTypeGroup) {
+        for (const type of group.fullInteractionType) {
+          for (const pair of type.interactionPair) {
+            // التحقق من أن التعارض يخص الدواء الجديد (وليس تعارض قديم بين أدوية المريض وبعضها)
+            // نتأكد أن أحد طرفي التعارض هو الدواء الجديد
+            const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
+            
+            if (involvedDrugs.includes(newDrugCui)) {
+               const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
+               const description = pair.description;
+               
+               // تحديد اسم الدواء المتعارض
+               const otherCui = involvedDrugs.find((c: string) => c !== newDrugCui);
+               const otherName = cuiToName[otherCui] || 'دواء آخر';
+
+               conflicts.push(`${severity}: تعارض بين الدواء الجديد و ${otherName}. \nالتفاصيل: ${description}`);
+            }
+          }
+        }
       }
-    });
+    }
 
     if (conflicts.length > 0) {
       return { safe: false, messages: conflicts };
     }
 
-    return { safe: true, message: "✅ آمن: لم يتم العثور على تعارضات معروفة." };
+    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات مسجلة." };
 
   } catch (error) {
-    console.error("API Error:", error);
-    return { safe: true, message: "تعذر الاتصال بخادم التفاعلات." };
+    console.error("Interaction API Error:", error);
+    return { safe: true, message: "خطأ في الاتصال بخادم التفاعلات." };
   }
 };
 
@@ -177,7 +201,7 @@ export default function SmartHospitalApp() {
       setUser({ id: data.id, name: data.name });
       setView('dashboard');
     } catch (err) {
-      alert('خطأ في الاتصال - تأكد من إعدادات Supabase');
+      alert('خطأ في الاتصال');
     }
   };
 
@@ -402,7 +426,6 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
   useEffect(() => {
     if (searchTerm.length > 2) {
       const timer = setTimeout(async () => {
-        // استخدام ilike للبحث المرن في قاعدة البيانات
         const { data } = await supabase.from('drugs').select('*').ilike('trade_name', `%${searchTerm}%`).limit(10);
         if (data) setDrugsList(data);
       }, 400);
@@ -415,8 +438,14 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
       const performCheck = async () => {
         setChecking(true);
         setAlert(null);
-        const result = await checkInteractionsLive(selectedDrug.active_ingredient, existingMeds);
-        setAlert({ type: result.safe ? 'success' : 'danger', msg: result.safe ? result.message : (result.messages || 'تعارض') });
+        // استخدام الدالة الجديدة المعتمدة على RxNav
+        const result = await checkInteractionsRxNav(selectedDrug.active_ingredient, existingMeds);
+        
+        if (!result.safe) {
+          setAlert({ type: 'danger', msg: result.messages || 'تعارض محتمل' });
+        } else {
+          setAlert({ type: 'success', msg: result.message });
+        }
         setChecking(false);
       };
       performCheck();
@@ -446,8 +475,8 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
           )}
         </div>
         {selectedDrug && <div><div className="p-3 bg-blue-50 text-blue-800 rounded text-sm mb-2"><strong>المادة الفعالة:</strong> {selectedDrug.active_ingredient}</div><input type="text" className="w-full border rounded-lg px-4 py-2" value={dose} onChange={e => setDose(e.target.value)} placeholder="الجرعة" /></div>}
-        {checking && <div className="text-sm text-blue-600 flex items-center gap-2"><Loader2 className="animate-spin" size={16}/> فحص التعارضات مع FDA...</div>}
-        {alert && !checking && <div className={`p-3 rounded text-sm ${alert.type === 'danger' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{Array.isArray(alert.msg) ? alert.msg.map((m, i) => <div key={i}>• {m}</div>) : alert.msg}</div>}
+        {checking && <div className="text-sm text-blue-600 flex items-center gap-2"><Loader2 className="animate-spin" size={16}/> جاري فحص التعارضات عبر RxNav...</div>}
+        {alert && !checking && <div className={`p-3 rounded text-sm whitespace-pre-line leading-relaxed ${alert.type === 'danger' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>{Array.isArray(alert.msg) ? alert.msg.map((m, i) => <div key={i}>• {m}</div>) : <div className="flex items-center gap-2"><ShieldCheck size={18}/> {alert.msg}</div>}</div>}
         <div className="flex justify-end gap-3"><button onClick={handleSubmit} disabled={alert?.type === 'danger' || !dose || checking} className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50">تأكيد</button></div>
       </div>
     </div>
