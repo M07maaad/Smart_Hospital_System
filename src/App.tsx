@@ -37,7 +37,7 @@ interface PatientMedication {
   start_date: string;
   active_ingredient: string;
   is_active: boolean;
-  rx_cui?: string; // تخزين كود RxNorm للدواء
+  rx_cui?: string; 
 }
 
 interface PatientNote {
@@ -48,10 +48,11 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ PROFESSIONAL INTERACTION CHECKER (RxNav API)
+// 🛠️ PROFESSIONAL INTERACTION CHECKER (RxNav API with CORS Proxy)
 // ==========================================
 
-// 1. قاموس لتصحيح الأسماء المصرية لتتوافق مع المعايير الأمريكية
+const CORS_PROXY = "https://api.allorigins.win/raw?url=";
+
 const DRUG_NAME_MAPPING: Record<string, string> = {
   "paracetamol": "acetaminophen",
   "amoxycillin": "amoxicillin",
@@ -66,97 +67,95 @@ const DRUG_NAME_MAPPING: Record<string, string> = {
   "salbutamol": "albuterol",
   "diclofenac potassium": "diclofenac",
   "diclofenac sodium": "diclofenac",
-  "warfarin sodium": "warfarin"
+  "warfarin sodium": "warfarin",
+  "bisoprolol fumarate": "bisoprolol",
+  "clopidogrel bisulfate": "clopidogrel"
 };
 
-// 2. دالة الحصول على كود RxNorm (الهوية الرقمية للدواء)
+// دالة الحصول على كود RxNorm (مع Proxy)
 const getRxCui = async (drugName: string): Promise<string | null> => {
   if (!drugName) return null;
 
-  // تنظيف الاسم
   let cleanName = drugName.toLowerCase().trim();
   
-  // معالجة الأسماء المركبة (Active Ingredients)
   if (cleanName.includes('+')) {
-     // RxNav يفهم التركيبات بشرط استخدام " / " بدلاً من "+"
-     // ولكن للأمان سنأخذ المادة الأولى الفعالة للبحث عن التعارضات الأساسية
-     // أو نحاول البحث عن التركيبة كاملة إذا كانت مدعومة
      cleanName = cleanName.split('+')[0].trim(); 
   }
 
-  // إزالة التراكيز والأشكال الصيدلية
   cleanName = cleanName.replace(/\d+(\.\d+)?\s*(mg|g|ml|mcg|iu)/g, '').trim();
   
-  // استخدام القاموس
   if (DRUG_NAME_MAPPING[cleanName]) {
     cleanName = DRUG_NAME_MAPPING[cleanName];
   }
 
   try {
-    const response = await fetch(`https://rxnav.nlm.nih.gov/REST/rxcui.json?name=${encodeURIComponent(cleanName)}`);
+    const targetUrl = `https://rxnav.nlm.nih.gov/REST/rxcui.json?name=${encodeURIComponent(cleanName)}`;
+    const response = await fetch(`${CORS_PROXY}${encodeURIComponent(targetUrl)}`);
+    
+    if (!response.ok) throw new Error("Network response was not ok");
+    
     const data = await response.json();
     if (data.idGroup && data.idGroup.rxnormId) {
-      return data.idGroup.rxnormId[0]; // إرجاع أول كود يتم العثور عليه
+      return data.idGroup.rxnormId[0];
     }
     return null;
   } catch (error) {
-    console.error("Error fetching RxCUI:", error);
+    console.warn(`Could not find RxCUI for ${cleanName}`, error);
     return null;
   }
 };
 
-// 3. الدالة الرئيسية للفحص باستخدام الأكواد (Interaction API)
+// الدالة الرئيسية للفحص (مع Proxy)
 const checkInteractionsRxNav = async (newDrugName: string, currentMeds: PatientMedication[]) => {
   if (!newDrugName || currentMeds.length === 0) return { safe: true, message: '' };
 
-  // 1. الحصول على كود الدواء الجديد
   const newDrugCui = await getRxCui(newDrugName);
   
   if (!newDrugCui) {
-    return { safe: true, message: `⚠️ تنبيه: لم يتم التعرف على الكود الدولي للمادة (${newDrugName}). يرجى المراجعة اليدوية.` };
+    return { safe: true, message: `⚠️ تنبيه: لم يتم التعرف على الكود الدولي للمادة (${newDrugName}). يرجى التأكد من الاسم العلمي.` };
   }
 
-  // 2. تجهيز قائمة أكواد أدوية المريض الحالية
-  // سنقوم بجلب الأكواد الحالية (في تطبيق حقيقي يفضل تخزين الكود في الداتا بيز عند الإضافة لتوفير هذا الاستدعاء)
   const medCuis: string[] = [];
   const cuiToName: Record<string, string> = {};
 
-  for (const med of currentMeds) {
+  // جلب أكواد الأدوية الحالية
+  await Promise.all(currentMeds.map(async (med) => {
     const cui = await getRxCui(med.active_ingredient);
     if (cui) {
       medCuis.push(cui);
       cuiToName[cui] = med.drug_name;
     }
-  }
+  }));
 
   if (medCuis.length === 0) return { safe: true, message: "✅ آمن (لم يتم العثور على أدوية مقابلة للفحص)." };
 
   try {
-    // 3. استدعاء API التعارضات (فحص الدواء الجديد ضد القائمة)
-    // الصيغة: interaction/list.json?rxcuis=CODE1+CODE2+CODE3...
     const allCuis = [newDrugCui, ...medCuis].join('+');
-    const response = await fetch(`https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuis}`);
-    const data = await response.json();
+    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuis}`;
+    
+    // استخدام البروكسي لتخطي مشاكل الاتصال
+    const response = await fetch(`${CORS_PROXY}${encodeURIComponent(targetUrl)}`);
+    
+    if (!response.ok) throw new Error("Interaction API failed");
 
+    const data = await response.json();
     const conflicts: string[] = [];
 
     if (data.fullInteractionTypeGroup) {
       for (const group of data.fullInteractionTypeGroup) {
         for (const type of group.fullInteractionType) {
           for (const pair of type.interactionPair) {
-            // التحقق من أن التعارض يخص الدواء الجديد (وليس تعارض قديم بين أدوية المريض وبعضها)
-            // نتأكد أن أحد طرفي التعارض هو الدواء الجديد
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
+            // التأكد أن الدواء الجديد طرف في التعارض
             if (involvedDrugs.includes(newDrugCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
                
-               // تحديد اسم الدواء المتعارض
                const otherCui = involvedDrugs.find((c: string) => c !== newDrugCui);
                const otherName = cuiToName[otherCui] || 'دواء آخر';
 
-               conflicts.push(`${severity}: تعارض بين الدواء الجديد و ${otherName}. \nالتفاصيل: ${description}`);
+               conflicts.push(`${severity}: تعارض بين الدواء الجديد و ${otherName}.`);
             }
           }
         }
@@ -171,7 +170,7 @@ const checkInteractionsRxNav = async (newDrugName: string, currentMeds: PatientM
 
   } catch (error) {
     console.error("Interaction API Error:", error);
-    return { safe: true, message: "خطأ في الاتصال بخادم التفاعلات." };
+    return { safe: true, message: "خطأ في الاتصال بخادم التفاعلات (Network Error)." };
   }
 };
 
@@ -438,7 +437,6 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
       const performCheck = async () => {
         setChecking(true);
         setAlert(null);
-        // استخدام الدالة الجديدة المعتمدة على RxNav
         const result = await checkInteractionsRxNav(selectedDrug.active_ingredient, existingMeds);
         
         if (!result.safe) {
