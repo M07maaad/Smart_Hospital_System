@@ -1,11 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
-// المتغيرات دي بتيجي من Vercel Environment Variables
+// Get environment variables
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Missing Supabase Environment Variables');
+  console.error('Supabase configuration is missing. Please check your .env or Vercel settings.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey);
+export const supabase = createClient(
+  supabaseUrl || '', 
+  supabaseKey || ''
+);
