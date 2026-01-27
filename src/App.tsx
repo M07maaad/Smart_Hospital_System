@@ -47,7 +47,7 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ PROFESSIONAL INTERACTION CHECKER (Direct + Failover)
+// 🛠️ PROFESSIONAL INTERACTION CHECKER (Multi-Proxy System)
 // ==========================================
 
 const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, currentMeds: PatientMedication[]) => {
@@ -97,32 +97,45 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
-  // 3. دالة مساعدة للاتصال (تستقبل الرابط وتعيد النتيجة)
-  const fetchInteractions = async (url: string) => {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Status ${response.status}`);
-    return await response.json();
-  };
+  // 3. نظام الاتصال المتعدد (Multi-Proxy Request)
+  // نحاول الاتصال عبر عدة طرق لضمان النجاح
+  const allCuisString = [safeNewCui, ...medCuis].join('+'); // RxNav يقبل + كفاصل
+  const targetApiUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
 
-  try {
-    // 4. المحاولة الأولى: اتصال مباشر (الأسرع والأدق)
-    // RxNav يتطلب مسافات بين الأكواد، سنستخدم + لتمثيل المسافة
-    const allCuisString = [safeNewCui, ...medCuis].join('+'); 
-    const directUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
-    
-    console.log("Attempting Direct Check:", directUrl);
-    
-    let data;
+  // قائمة الاستراتيجيات بالترتيب
+  const strategies = [
+    // 1. CorsProxy.io (سريع وموثوق)
+    { name: "CorsProxy", url: `https://corsproxy.io/?${encodeURIComponent(targetApiUrl)}` },
+    // 2. AllOrigins (بديل قوي)
+    { name: "AllOrigins", url: `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}` },
+    // 3. Direct (محاولة أخيرة)
+    { name: "Direct", url: targetApiUrl }
+  ];
+
+  let data = null;
+  let lastError = null;
+
+  for (const strat of strategies) {
     try {
-      data = await fetchInteractions(directUrl);
-    } catch (directError) {
-      console.warn("Direct connection failed, switching to proxy...", directError);
-      // 5. المحاولة الثانية: استخدام بروكسي بديل موثوق (Backup)
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
-      data = await fetchInteractions(proxyUrl);
+      console.log(`Trying interaction check via ${strat.name}...`);
+      const response = await fetch(strat.url);
+      if (response.ok) {
+        data = await response.json();
+        console.log(`Success via ${strat.name}`);
+        break; // نجح الاتصال، نخرج من الحلقة
+      }
+    } catch (e) {
+      console.warn(`Failed via ${strat.name}`, e);
+      lastError = e;
     }
+  }
 
-    // 6. تحليل البيانات
+  if (!data) {
+    return { safe: true, message: `تعذر الاتصال بخادم التفاعلات بعد عدة محاولات. تأكد من الإنترنت.` };
+  }
+
+  // 4. تحليل البيانات
+  try {
     const conflicts: string[] = [];
 
     if (data.fullInteractionTypeGroup) {
@@ -154,8 +167,8 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
 
   } catch (error) {
-    console.error("All interaction checks failed:", error);
-    return { safe: true, message: "تعذر الاتصال بخادم التفاعلات (يرجى التحقق من الإنترنت)." };
+    console.error("Data Parsing Error:", error);
+    return { safe: true, message: "حدث خطأ أثناء قراءة بيانات التفاعلات." };
   }
 };
 
