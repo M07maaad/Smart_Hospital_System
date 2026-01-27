@@ -12,7 +12,7 @@ interface Drug {
   id: string;
   trade_name: string;
   active_ingredient: string;
-  rx_cui?: string; // الكود الدولي (مهم جداً)
+  rx_cui?: string; // الكود الدولي
 }
 
 interface Patient {
@@ -36,7 +36,7 @@ interface PatientMedication {
   start_date: string;
   active_ingredient: string;
   is_active: boolean;
-  rx_cui?: string; // تخزين الكود مع دواء المريض
+  rx_cui?: string; 
 }
 
 interface PatientNote {
@@ -52,59 +52,77 @@ interface PatientNote {
 
 const CORS_PROXY = "https://api.allorigins.win/raw?url=";
 
-// هذه الدالة تعتمد كلياً على الأكواد (RxCUI) ولا تستخدم الأسماء
 const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, currentMeds: PatientMedication[]) => {
   // 1. التحقق من وجود كود للدواء الجديد
   if (!newDrugCui) {
-    return { safe: true, message: `⚠️ تنبيه: الدواء (${newDrugName}) غير مكود دولياً في النظام. لا يمكن فحص التفاعلات له بدقة.` };
+    return { safe: true, message: `⚠️ تنبيه: الدواء (${newDrugName}) غير مكود دولياً. لا يمكن فحص التفاعلات له.` };
   }
 
-  // 2. تجميع أكواد أدوية المريض (فقط الأدوية التي لها كود)
-  const validMeds = currentMeds.filter(m => m.rx_cui && m.is_active);
-  
-  if (validMeds.length === 0) {
-    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية مكودة للمقارنة)." };
-  }
-
-  const medCuis = validMeds.map(m => m.rx_cui);
-  
-  // خريطة لربط الكود باسم الدواء لعرض الرسالة (عشان نقوله التعارض مع دواء كذا)
+  // 2. تجهيز القائمة: محاولة العثور على أكواد للأدوية القديمة التي ليس لها كود
+  // هذه الخطوة "تعالج" البيانات القديمة تلقائياً
+  const medCuis: string[] = [];
   const cuiToName: Record<string, string> = {};
-  validMeds.forEach(m => { if(m.rx_cui) cuiToName[m.rx_cui] = m.drug_name; });
+
+  for (const med of currentMeds) {
+    if (!med.is_active) continue;
+
+    let cui = med.rx_cui;
+
+    // إذا لم يكن للدواء كود (بيانات قديمة)، نحاول البحث عنه في قاعدة البيانات
+    if (!cui && med.active_ingredient) {
+      try {
+        const { data } = await supabase
+          .from('drugs')
+          .select('rx_cui')
+          .ilike('active_ingredient', med.active_ingredient)
+          .not('rx_cui', 'is', null)
+          .limit(1);
+        
+        if (data && data.length > 0) {
+          cui = data[0].rx_cui;
+        }
+      } catch (e) {
+        console.warn("Failed to find code for old drug", med.drug_name);
+      }
+    }
+
+    if (cui) {
+      medCuis.push(cui);
+      cuiToName[cui] = med.drug_name;
+    }
+  }
+  
+  if (medCuis.length === 0) {
+    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية يمكن مقارنتها)." };
+  }
 
   try {
-    // 3. استدعاء API التفاعلات مباشرة (RxNav Interaction API)
-    // نرسل كود الدواء الجديد + أكواد الأدوية الحالية
+    // 3. استدعاء API التفاعلات
     const allCuis = [newDrugCui, ...medCuis].join('+');
     const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuis}`;
     
-    // استخدام البروكسي لتفادي مشاكل المتصفح
     const response = await fetch(`${CORS_PROXY}${encodeURIComponent(targetUrl)}`);
     if (!response.ok) throw new Error("API failed");
 
     const data = await response.json();
     const conflicts: string[] = [];
 
-    // 4. تحليل النتيجة بدقة
     if (data.fullInteractionTypeGroup) {
       for (const group of data.fullInteractionTypeGroup) {
         for (const type of group.fullInteractionType) {
           for (const pair of type.interactionPair) {
             
-            // استخراج الأدوية المتورطة في هذا التعارض
             const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
             
-            // شرط أساسي: لازم الدواء الجديد يكون طرف في المشكلة
-            // (عشان منعرضش تعارضات قديمة بين أدوية المريض وبعضها)
+            // شرط أساسي: الدواء الجديد طرف في المشكلة
             if (involvedDrugs.includes(newDrugCui)) {
                const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
                const description = pair.description;
                
-               // معرفة اسم الدواء الآخر المتعارض معه
                const otherCui = involvedDrugs.find((c: string) => c !== newDrugCui);
-               const otherName = cuiToName[otherCui || ''] || 'دواء آخر في القائمة';
+               const otherName = cuiToName[otherCui || ''] || 'دواء آخر';
 
-               conflicts.push(`${severity}: تعارض بين (${newDrugName}) و (${otherName}).\n📝 التفاصيل: ${description}`);
+               conflicts.push(`${severity}: تعارض بين (${newDrugName}) و (${otherName}).\n📝 ${description}`);
             }
           }
         }
@@ -544,7 +562,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
         setChecking(true);
         setAlert(null);
         
-        // استخدام الدالة الجديدة المعتمدة على الأكواد
+        // استخدام الدالة الجديدة التي تعالج الأدوية القديمة تلقائياً
         const result = await checkInteractionsByCode(
             selectedDrug.rx_cui || '', 
             selectedDrug.trade_name, 
@@ -564,7 +582,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
 
   const handleSubmit = async () => {
     if (selectedDrug && dose) {
-      await supabase.from('patient_medications').insert({
+      const { error } = await supabase.from('patient_medications').insert({
         patient_id: patientId, 
         drug_name: selectedDrug.trade_name, 
         active_ingredient: selectedDrug.active_ingredient, 
@@ -573,7 +591,12 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
         is_active: true,
         rx_cui: selectedDrug.rx_cui // تخزين الكود للمستقبل
       });
-      onSuccess();
+
+      if (error) {
+        alert("فشل في إضافة الدواء: " + error.message);
+      } else {
+        onSuccess();
+      }
     }
   };
 
