@@ -4,7 +4,7 @@ import {
   User, Lock, Activity, Users, Pill, 
   AlertTriangle, Plus, Trash2, Search, 
   Stethoscope, Thermometer, Heart, Droplet, 
-  ChevronRight, ArrowLeft, X, Loader2, ShieldCheck, FileText
+  ChevronRight, ArrowLeft, X, Loader2, ShieldCheck, FileText, WifiOff
 } from 'lucide-react';
 
 // --- Types ---
@@ -47,10 +47,15 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ PROFESSIONAL INTERACTION CHECKER (Multi-Proxy System)
+// 🛠️ PROFESSIONAL INTERACTION CHECKER (Robust Network Logic)
 // ==========================================
 
-const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, currentMeds: PatientMedication[]) => {
+const checkInteractionsByCode = async (
+  newDrugCui: string, 
+  newDrugName: string, 
+  currentMeds: PatientMedication[], 
+  setStatus: (status: string) => void
+) => {
   // 1. تنظيف كود الدواء الجديد
   const safeNewCui = newDrugCui ? String(newDrugCui).trim() : '';
   
@@ -67,8 +72,7 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
 
     let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
 
-    // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
-    if ((!cui || cui === 'null') && med.active_ingredient) {
+    if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
       try {
         const { data } = await supabase
           .from('drugs')
@@ -77,12 +81,10 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
           .not('rx_cui', 'is', null)
           .limit(1);
         
-        if (data && data.length > 0 && data[0].rx_cui) {
+        if (data && data.length > 0) {
           cui = String(data[0].rx_cui).trim();
         }
-      } catch (e) {
-        // تجاهل الخطأ الصامت
-      }
+      } catch (e) {}
     }
 
     if (cui && /^\d+$/.test(cui) && cui !== safeNewCui) {
@@ -97,44 +99,63 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
     return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
-  // 3. نظام الاتصال المتعدد (Multi-Proxy Request)
-  // نحاول الاتصال عبر عدة طرق لضمان النجاح
-  const allCuisString = [safeNewCui, ...medCuis].join('+'); // RxNav يقبل + كفاصل
-  const targetApiUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
+  // 3. استراتيجيات الاتصال (Strategies)
+  const allCuisString = [safeNewCui, ...medCuis].join('+');
+  const rxNavUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
 
-  // قائمة الاستراتيجيات بالترتيب
   const strategies = [
-    // 1. CorsProxy.io (سريع وموثوق)
-    { name: "CorsProxy", url: `https://corsproxy.io/?${encodeURIComponent(targetApiUrl)}` },
-    // 2. AllOrigins (بديل قوي)
-    { name: "AllOrigins", url: `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}` },
-    // 3. Direct (محاولة أخيرة)
-    { name: "Direct", url: targetApiUrl }
+    {
+      name: "Direct Connection",
+      url: rxNavUrl,
+      handler: async (res: Response) => {
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        return await res.json();
+      }
+    },
+    {
+      name: "AllOrigins Proxy",
+      // نستخدم 'get' بدلاً من 'raw' لأنه أكثر استقراراً، لكنه يغلف البيانات في JSON
+      url: `https://api.allorigins.win/get?url=${encodeURIComponent(rxNavUrl)}`,
+      handler: async (res: Response) => {
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        const wrapper = await res.json();
+        // AllOrigins يرجع البيانات كنص داخل خاصية contents
+        return JSON.parse(wrapper.contents); 
+      }
+    },
+    {
+      name: "CorsProxy.io",
+      url: `https://corsproxy.io/?${encodeURIComponent(rxNavUrl)}`,
+      handler: async (res: Response) => {
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        return await res.json();
+      }
+    }
   ];
 
+  // 4. تنفيذ المحاولات
   let data = null;
-  let lastError = null;
-
+  
   for (const strat of strategies) {
     try {
-      console.log(`Trying interaction check via ${strat.name}...`);
+      setStatus(`جاري الاتصال عبر ${strat.name}...`);
+      console.log(`[Attempting] ${strat.name}: ${strat.url}`);
+      
       const response = await fetch(strat.url);
-      if (response.ok) {
-        data = await response.json();
-        console.log(`Success via ${strat.name}`);
-        break; // نجح الاتصال، نخرج من الحلقة
-      }
+      data = await strat.handler(response);
+      
+      setStatus("تم الاتصال بنجاح.");
+      break; // نجح الاتصال
     } catch (e) {
-      console.warn(`Failed via ${strat.name}`, e);
-      lastError = e;
+      console.warn(`[Failed] ${strat.name}`, e);
     }
   }
 
   if (!data) {
-    return { safe: true, message: `تعذر الاتصال بخادم التفاعلات بعد عدة محاولات. تأكد من الإنترنت.` };
+    return { safe: true, message: "❌ فشل الاتصال بخادم التفاعلات بجميع الطرق. يرجى التحقق من الإنترنت." };
   }
 
-  // 4. تحليل البيانات
+  // 5. تحليل البيانات (Parsing)
   try {
     const conflicts: string[] = [];
 
@@ -164,10 +185,10 @@ const checkInteractionsByCode = async (newDrugCui: string, newDrugName: string, 
       return { safe: false, messages: conflicts };
     }
 
-    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
+    return { safe: true, message: "✅ آمن: تم الفحص ولا توجد تعارضات مسجلة." };
 
   } catch (error) {
-    console.error("Data Parsing Error:", error);
+    console.error("Parsing Error:", error);
     return { safe: true, message: "حدث خطأ أثناء قراءة بيانات التفاعلات." };
   }
 };
@@ -569,12 +590,12 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
   const [dose, setDose] = useState('');
   const [alert, setAlert] = useState<{ type: string, msg: string | string[] } | null>(null);
   const [checking, setChecking] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(''); // حالة الاتصال
 
   // البحث في Supabase (بالأسماء)
   useEffect(() => {
     if (searchTerm.length > 2) {
       const timer = setTimeout(async () => {
-        // نختار الأدوية ونتأكد من جلب الـ rx_cui
         const { data } = await supabase
           .from('drugs')
           .select('*')
@@ -592,12 +613,13 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
       const performCheck = async () => {
         setChecking(true);
         setAlert(null);
+        setStatusMsg("جاري الاتصال بخوادم التفاعلات...");
         
-        // استخدام الدالة الجديدة التي تعالج الأدوية القديمة تلقائياً
         const result = await checkInteractionsByCode(
             selectedDrug.rx_cui || '', 
             selectedDrug.trade_name, 
-            existingMeds
+            existingMeds,
+            setStatusMsg // تمرير دالة تحديث الحالة
         );
         
         if (!result.safe) {
@@ -692,8 +714,9 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
 
           {/* Interaction Status */}
           {checking && (
-            <div className="flex items-center justify-center gap-2 py-2 text-blue-600 text-sm font-medium bg-blue-50/50 rounded-lg">
-              <Loader2 className="animate-spin" size={18}/> جاري فحص التعارضات الطبية...
+            <div className="flex flex-col items-center justify-center gap-2 py-3 text-blue-600 text-sm font-medium bg-blue-50/50 rounded-lg">
+              <div className="flex items-center gap-2"><Loader2 className="animate-spin" size={18}/> جاري فحص التعارضات...</div>
+              <div className="text-xs text-blue-400 font-normal">{statusMsg}</div>
             </div>
           )}
 
