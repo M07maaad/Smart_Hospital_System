@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './lib/supabase';
-import { checkDrugInteractions } from './services/interactionChecker';
 import { 
   User, Lock, Activity, Users, Pill, 
   AlertTriangle, Plus, Trash2, Search, 
@@ -47,6 +46,129 @@ interface PatientNote {
   note_text: string;
 }
 
+// ==========================================
+// 🛠️ FINAL & ROBUST INTERACTION CHECKER
+// ==========================================
+
+const checkInteractionsByCode = async (
+  newDrugCui: string, 
+  newDrugName: string, 
+  currentMeds: PatientMedication[], 
+  setStatus: (status: string) => void
+) => {
+  // 1. التحقق من صحة كود الدواء الجديد
+  const safeNewCui = newDrugCui ? String(newDrugCui).trim() : '';
+  
+  if (!safeNewCui || !/^\d+$/.test(safeNewCui)) {
+    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح للفحص (${safeNewCui}).` };
+  }
+
+  // 2. تجميع أكواد أدوية المريض
+  const medCuisSet = new Set<string>();
+  const cuiToName: Record<string, string> = {};
+
+  for (const med of currentMeds) {
+    if (!med.is_active) continue;
+
+    let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
+
+    // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
+    if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
+      try {
+        const { data } = await supabase
+          .from('drugs')
+          .select('rx_cui')
+          .ilike('active_ingredient', med.active_ingredient)
+          .not('rx_cui', 'is', null)
+          .limit(1);
+        
+        if (data && data.length > 0) {
+          cui = String(data[0].rx_cui).trim();
+        }
+      } catch (e) {}
+    }
+
+    if (cui && /^\d+$/.test(cui) && cui !== safeNewCui) {
+      medCuisSet.add(cui);
+      cuiToName[cui] = med.drug_name;
+    }
+  }
+  
+  const medCuis = Array.from(medCuisSet);
+
+  if (medCuis.length === 0) {
+    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
+  }
+
+  // 3. الاتصال باستخدام Wrapped Proxy
+  try {
+    setStatus("جاري الاتصال بخادم التفاعلات...");
+    
+    const allCuisString = [safeNewCui, ...medCuis].join('+');
+    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
+
+    // نجرب أكثر من proxy للموثوقية
+    const proxies = [
+      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+    ];
+
+    let data: any = null;
+
+    for (const proxyUrl of proxies) {
+      try {
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) continue;
+        const raw = await res.json();
+        // allorigins يلف البيانات في .contents - corsproxy يرجع JSON مباشرة
+        data = raw.contents ? JSON.parse(raw.contents) : raw;
+        if (data) break;
+      } catch {
+        continue;
+      }
+    }
+
+    if (!data) {
+      throw new Error('تعذّر الاتصال بخادم التفاعلات');
+    }
+
+    // 4. تحليل البيانات
+    const conflicts: string[] = [];
+
+    if (data.fullInteractionTypeGroup) {
+      for (const group of data.fullInteractionTypeGroup) {
+        for (const type of group.fullInteractionType) {
+          for (const pair of type.interactionPair) {
+            
+            const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
+            
+            // التأكد أن الدواء الجديد هو سبب المشكلة
+            if (involvedDrugs.includes(safeNewCui)) {
+               const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
+               const description = pair.description;
+               
+               const otherCui = involvedDrugs.find((c: string) => c !== safeNewCui);
+               const otherName = cuiToName[otherCui || ''] || 'دواء آخر';
+
+               conflicts.push(`${severity}: تعارض بين (${newDrugName}) و (${otherName}).\n📝 ${description}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (conflicts.length > 0) {
+      return { safe: false, messages: conflicts };
+    }
+
+    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
+
+  } catch (error) {
+    console.error("Check Error:", error);
+    const msg = error instanceof Error ? error.message : "Unknown";
+    return { safe: true, message: `حدث خطأ أثناء الاتصال (${msg}).` };
+  }
+};
 
 // ==========================================
 // MAIN APP LOGIC
@@ -470,11 +592,11 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
         setAlert(null);
         setStatusMsg("جاري الاتصال بخوادم التفاعلات...");
         
-        const result = await checkDrugInteractions(
+        const result = await checkInteractionsByCode(
             selectedDrug.rx_cui || '', 
             selectedDrug.trade_name, 
             existingMeds,
-            setStatusMsg
+            setStatusMsg // تمرير دالة تحديث الحالة
         );
         
         if (!result.safe) {
