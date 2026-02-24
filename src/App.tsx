@@ -104,14 +104,27 @@ const checkInteractionsByCode = async (
   try {
     setStatus("جاري الاتصال بخادم التفاعلات...");
 
-    const { data: fnData, error: fnError } = await supabase.functions.invoke('check-interactions', {
-      body: { rxcuis: [safeNewCui, ...medCuis] },
+    // نستخدم fetch مباشرة لتجنب مشاكل JWT مع custom auth
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const fnUrl = `${supabaseUrl}/functions/v1/check-interactions`;
+
+    const res = await fetch(fnUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+      },
+      body: JSON.stringify({ rxcuis: [safeNewCui, ...medCuis] }),
     });
 
-    if (fnError) throw new Error(fnError.message);
-    if (!fnData) throw new Error('لم يُرجع الخادم بيانات');
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Edge Function error (${res.status}): ${errText}`);
+    }
 
-    const data = fnData;
+    const data = await res.json();
 
     // 4. تحليل البيانات
     const conflicts: string[] = [];
