@@ -100,37 +100,18 @@ const checkInteractionsByCode = async (
     return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
   }
 
-  // 3. الاتصال باستخدام Wrapped Proxy
+  // 3. الاتصال عبر Supabase Edge Function
   try {
     setStatus("جاري الاتصال بخادم التفاعلات...");
-    
-    const allCuisString = [safeNewCui, ...medCuis].join('+');
-    const targetUrl = `https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis=${allCuisString}&sources=ONCHigh`;
 
-    // نجرب أكثر من proxy للموثوقية
-    const proxies = [
-      `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
-      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
-    ];
+    const { data: fnData, error: fnError } = await supabase.functions.invoke('check-interactions', {
+      body: { rxcuis: [safeNewCui, ...medCuis] },
+    });
 
-    let data: any = null;
+    if (fnError) throw new Error(fnError.message);
+    if (!fnData) throw new Error('لم يُرجع الخادم بيانات');
 
-    for (const proxyUrl of proxies) {
-      try {
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) continue;
-        const raw = await res.json();
-        // allorigins يلف البيانات في .contents - corsproxy يرجع JSON مباشرة
-        data = raw.contents ? JSON.parse(raw.contents) : raw;
-        if (data) break;
-      } catch {
-        continue;
-      }
-    }
-
-    if (!data) {
-      throw new Error('تعذّر الاتصال بخادم التفاعلات');
-    }
+    const data = fnData;
 
     // 4. تحليل البيانات
     const conflicts: string[] = [];
