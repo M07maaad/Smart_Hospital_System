@@ -47,64 +47,34 @@ interface PatientNote {
 }
 
 // ==========================================
-// 🛠️ FINAL & ROBUST INTERACTION CHECKER
+// 🛠️ INTERACTION CHECKER - LOCAL DATABASE
 // ==========================================
 
 const checkInteractionsByCode = async (
-  newDrugCui: string, 
-  newDrugName: string, 
-  currentMeds: PatientMedication[], 
+  newDrugIngredient: string,
+  newDrugName: string,
+  currentMeds: PatientMedication[],
   setStatus: (status: string) => void
 ) => {
-  // 1. التحقق من صحة كود الدواء الجديد
-  const safeNewCui = newDrugCui ? String(newDrugCui).trim() : '';
-  
-  if (!safeNewCui || !/^\d+$/.test(safeNewCui)) {
-    return { safe: true, message: `⚠️ تنبيه: كود الدواء (${newDrugName}) غير صالح للفحص (${safeNewCui}).` };
+  const ingredient = newDrugIngredient ? String(newDrugIngredient).trim() : '';
+
+  if (!ingredient) {
+    return { safe: true, message: `⚠️ تنبيه: المادة الفعالة للدواء (${newDrugName}) غير متوفرة للفحص.` };
   }
 
-  // 2. تجميع أكواد أدوية المريض
-  const medCuisSet = new Set<string>();
-  const cuiToName: Record<string, string> = {};
+  // تجميع أدوية المريض الحالية (المادة الفعالة + الاسم التجاري)
+  const currentMedsList = currentMeds
+    .filter(m => m.is_active && m.active_ingredient)
+    .map(m => ({ drug_name: m.drug_name, active_ingredient: m.active_ingredient }));
 
-  for (const med of currentMeds) {
-    if (!med.is_active) continue;
-
-    let cui = med.rx_cui ? String(med.rx_cui).trim() : null;
-
-    // محاولة استرجاع الكود من الداتا بيز للأدوية القديمة
-    if ((!cui || cui === 'null' || cui === 'undefined') && med.active_ingredient) {
-      try {
-        const { data } = await supabase
-          .from('drugs')
-          .select('rx_cui')
-          .ilike('active_ingredient', med.active_ingredient)
-          .not('rx_cui', 'is', null)
-          .limit(1);
-        
-        if (data && data.length > 0) {
-          cui = String(data[0].rx_cui).trim();
-        }
-      } catch (e) {}
-    }
-
-    if (cui && /^\d+$/.test(cui) && cui !== safeNewCui) {
-      medCuisSet.add(cui);
-      cuiToName[cui] = med.drug_name;
-    }
-  }
-  
-  const medCuis = Array.from(medCuisSet);
-
-  if (medCuis.length === 0) {
-    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية صالحة للمقارنة)." };
+  if (currentMedsList.length === 0) {
+    return { safe: true, message: "✅ آمن (لا توجد أدوية حالية للمقارنة)." };
   }
 
-  // 3. الاتصال عبر Supabase Edge Function
+  // الاتصال بالـ Edge Function
   try {
-    setStatus("جاري الاتصال بخادم التفاعلات...");
+    setStatus("جاري فحص التعارضات...");
 
-    // نستخدم fetch مباشرة لتجنب مشاكل JWT مع custom auth
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
     const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
     const fnUrl = `${supabaseUrl}/functions/v1/check-interactions`;
@@ -116,7 +86,11 @@ const checkInteractionsByCode = async (
         'apikey': supabaseKey,
         'Authorization': `Bearer ${supabaseKey}`,
       },
-      body: JSON.stringify({ rxcuis: [safeNewCui, ...medCuis] }),
+      body: JSON.stringify({
+        drug_name: newDrugName,
+        drug_ingredient: ingredient,
+        current_meds: currentMedsList,
+      }),
     });
 
     if (!res.ok) {
@@ -126,36 +100,14 @@ const checkInteractionsByCode = async (
 
     const data = await res.json();
 
-    // 4. تحليل البيانات
-    const conflicts: string[] = [];
+    // 4. تحليل الرد من الـ Edge Function
+    if (data.error) throw new Error(data.error);
 
-    if (data.fullInteractionTypeGroup) {
-      for (const group of data.fullInteractionTypeGroup) {
-        for (const type of group.fullInteractionType) {
-          for (const pair of type.interactionPair) {
-            
-            const involvedDrugs = pair.interactionConcept.map((c: any) => c.minConceptItem.rxcui);
-            
-            // التأكد أن الدواء الجديد هو سبب المشكلة
-            if (involvedDrugs.includes(safeNewCui)) {
-               const severity = pair.severity === 'high' ? '⛔ خطر شديد' : '⚠️ تحذير';
-               const description = pair.description;
-               
-               const otherCui = involvedDrugs.find((c: string) => c !== safeNewCui);
-               const otherName = cuiToName[otherCui || ''] || 'دواء آخر';
-
-               conflicts.push(`${severity}: تعارض بين (${newDrugName}) و (${otherName}).\n📝 ${description}`);
-            }
-          }
-        }
-      }
+    if (!data.safe && data.messages) {
+      return { safe: false, messages: data.messages };
     }
 
-    if (conflicts.length > 0) {
-      return { safe: false, messages: conflicts };
-    }
-
-    return { safe: true, message: "✅ آمن: تم الفحص عبر RxNav ولا توجد تعارضات." };
+    return { safe: true, message: data.message || "✅ آمن: لا توجد تعارضات معروفة." };
 
   } catch (error) {
     console.error("Check Error:", error);
@@ -587,10 +539,10 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess }: any
         setStatusMsg("جاري الاتصال بخوادم التفاعلات...");
         
         const result = await checkInteractionsByCode(
-            selectedDrug.rx_cui || '', 
-            selectedDrug.trade_name, 
+            selectedDrug.active_ingredient || '',
+            selectedDrug.trade_name,
             existingMeds,
-            setStatusMsg // تمرير دالة تحديث الحالة
+            setStatusMsg
         );
         
         if (!result.safe) {
