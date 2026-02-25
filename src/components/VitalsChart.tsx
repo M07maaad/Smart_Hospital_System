@@ -17,10 +17,21 @@ export function VitalsChart({ data, darkMode }: VitalsChartProps) {
   // Parse BP to Systolic/Diastolic for charting?
   // For simplicity, let's just chart HR and SpO2 for now, as BP is string "120/80".
 
-  const chartData = data.map(d => ({
-    ...d,
-    formattedDate: format(parseISO(d.date), 'MM/dd HH:mm'),
-  }));
+  const chartData = data.map(d => {
+    let systolic = 0;
+    let diastolic = 0;
+    if (typeof d.bp === 'string' && d.bp.includes('/')) {
+        const [sys, dia] = d.bp.split('/').map(Number);
+        systolic = sys || 0;
+        diastolic = dia || 0;
+    }
+    return {
+        ...d,
+        systolic,
+        diastolic,
+        formattedDate: format(parseISO(d.date), 'MM/dd HH:mm'),
+    };
+  });
 
   return (
     <div className={`w-full h-[300px] mt-8 p-4 rounded-2xl border ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
@@ -45,6 +56,8 @@ export function VitalsChart({ data, darkMode }: VitalsChartProps) {
           <Line type="monotone" dataKey="hr" name="Heart Rate" stroke="#f43f5e" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
           <Line type="monotone" dataKey="spo2" name="SpO2 %" stroke="#06b6d4" strokeWidth={2} dot={{ r: 4 }} />
           <Line type="monotone" dataKey="temp" name="Temp °C" stroke="#f97316" strokeWidth={2} dot={{ r: 4 }} />
+          <Line type="monotone" dataKey="systolic" name="BP Sys" stroke="#8b5cf6" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="5 5" />
+          <Line type="monotone" dataKey="diastolic" name="BP Dia" stroke="#a78bfa" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="3 3" />
         </LineChart>
       </ResponsiveContainer>
     </div>

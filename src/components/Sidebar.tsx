@@ -31,10 +31,13 @@ export function Sidebar({ user, view, setView, darkMode, toggleDarkMode }: Sideb
               : `hover:${darkMode ? 'bg-slate-800' : 'bg-slate-100'} ${darkMode ? 'text-slate-300' : 'text-slate-600'}`
           }`}
         >
-          <Users size={20} /> <span>لوحة المرضى</span>
+          <Users size={20} /> <span>In-Patients Dashboard</span>
         </button>
-        <button className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all cursor-not-allowed opacity-60 ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'}`}>
-          <FileText size={20} /> <span>التقارير (قريباً)</span>
+        <button
+          onClick={() => alert("Please select a patient from the dashboard to view their labs.")}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'}`}
+        >
+          <FileText size={20} /> <span>Labs & Reports</span>
         </button>
       </nav>
 

@@ -53,6 +53,34 @@ ADD COLUMN IF NOT EXISTS last_taken timestamptz;
 -- Optional: Comment on columns
 COMMENT ON COLUMN patient_medications.frequency IS 'Frequency in hours (e.g. 8, 12, 24)';
 COMMENT ON COLUMN patient_medications.last_taken IS 'Timestamp of the last dose taken';
+
+-- Add table for Labs
+CREATE TABLE IF NOT EXISTS patient_labs (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  patient_id uuid REFERENCES patients(id) ON DELETE CASCADE,
+  test_name text NOT NULL,
+  result_value text,
+  unit text,
+  status text DEFAULT 'Pending', -- Pending, Completed, Critical
+  created_at timestamptz DEFAULT now(),
+  requested_by text
+);
+
+-- Add table for Vitals Log
+CREATE TABLE IF NOT EXISTS patient_vitals_log (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  patient_id uuid REFERENCES patients(id) ON DELETE CASCADE,
+  recorded_at timestamptz DEFAULT now(),
+  hr integer,
+  bp_systolic integer,
+  bp_diastolic integer,
+  temp numeric,
+  spo2 integer,
+  recorded_by text
+);
+
+-- Update patients table to support vitals json update (if needed)
+-- (patients table usually has 'vitals' column as jsonb)
 ```
 
 ## Deployment

@@ -48,3 +48,26 @@ export interface PatientNote {
   doctor_name: string;
   note_text: string;
 }
+
+export interface LabResult {
+  id: string;
+  patient_id: string;
+  test_name: string;
+  result_value: string;
+  unit: string;
+  status: 'Pending' | 'Completed' | 'Critical';
+  created_at: string;
+  requested_by: string;
+}
+
+export interface VitalsLog {
+  id: string;
+  patient_id: string;
+  recorded_at: string;
+  hr: number;
+  bp_systolic: number;
+  bp_diastolic: number;
+  temp: number;
+  spo2: number;
+  recorded_by: string;
+}

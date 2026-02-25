@@ -4,6 +4,8 @@ import { Patient, PatientMedication, Drug, PatientNote } from '../types';
 import { checkInteractionsByCode } from '../services/api';
 import { FREQUENCIES, getNextDose, isMedicationDue, formatNextDose } from '../utils/medicationReminders';
 import { VitalsChart } from './VitalsChart';
+import { LabsTab } from './LabsTab';
+import { VitalsEntryModal } from './VitalsEntryModal';
 import {
   ArrowLeft, Heart, Activity, Thermometer, Droplet, FileText,
   Pill, Plus, Loader2, Trash2, X, Search, AlertTriangle, ShieldCheck, Clock, CheckCircle
@@ -17,7 +19,7 @@ interface PatientDetailsViewProps {
 }
 
 export function PatientDetailsView({ patient, currentUser, onBack, darkMode = false }: PatientDetailsViewProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'meds' | 'notes'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'meds' | 'notes' | 'labs'>('overview');
 
   return (
     <div className={`flex flex-col h-full ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
@@ -50,6 +52,7 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
         <TabButton label="نظرة عامة (Vitals)" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} darkMode={darkMode} />
         <TabButton label="الأدوية والخطة العلاجية" active={activeTab === 'meds'} onClick={() => setActiveTab('meds')} darkMode={darkMode} />
         <TabButton label="المتابعة والملاحظات" active={activeTab === 'notes'} onClick={() => setActiveTab('notes')} darkMode={darkMode} />
+        <TabButton label="Labs & Reports" active={activeTab === 'labs'} onClick={() => setActiveTab('labs')} darkMode={darkMode} />
       </div>
 
       {/* Content */}
@@ -58,6 +61,7 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
           {activeTab === 'overview' && <OverviewTab patient={patient} darkMode={darkMode} />}
           {activeTab === 'meds' && <MedicationsTab patient={patient} darkMode={darkMode} />}
           {activeTab === 'notes' && <NotesTab patientId={patient.id} doctorName={currentUser} darkMode={darkMode} />}
+          {activeTab === 'labs' && <LabsTab patientId={patient.id} currentUser={currentUser} darkMode={darkMode} />}
         </div>
       </div>
     </div>
@@ -66,8 +70,10 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
 
 function OverviewTab({ patient, darkMode }: { patient: Patient, darkMode: boolean }) {
   const vitals = patient.vitals || { hr: 0, bp: '--/--', temp: 0, spo2: 0 };
+  const [showVitalsModal, setShowVitalsModal] = useState(false);
 
   // Mock history data based on current vitals for visualization
+  // In a real app, we would fetch this from 'patient_vitals_log'
   const [mockHistory, setMockHistory] = useState<any[]>([]);
 
   useEffect(() => {
@@ -101,9 +107,17 @@ function OverviewTab({ patient, darkMode }: { patient: Patient, darkMode: boolea
       </div>
 
       <div className={`p-6 rounded-2xl shadow-sm border ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
-          <h3 className={`font-bold text-lg mb-6 flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-            <FileText size={20} className="text-blue-600"/> البيانات الطبية
-          </h3>
+          <div className="flex justify-between items-center mb-6">
+            <h3 className={`font-bold text-lg flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                <FileText size={20} className="text-blue-600"/> البيانات الطبية
+            </h3>
+            <button
+                onClick={() => setShowVitalsModal(true)}
+                className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg font-medium transition-colors"
+            >
+                Add Vitals Reading
+            </button>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div>
               <span className={`text-xs uppercase font-bold tracking-wider mb-2 block ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>التشخيص الحالي</span>
@@ -139,6 +153,21 @@ function OverviewTab({ patient, darkMode }: { patient: Patient, darkMode: boolea
              <VitalsChart data={mockHistory} darkMode={darkMode} />
          </div>
       </div>
+
+      {showVitalsModal && (
+        <VitalsEntryModal
+            patientId={patient.id}
+            currentUser="Current User" // In real app, pass actual user
+            onClose={() => setShowVitalsModal(false)}
+            onSuccess={() => {
+                setShowVitalsModal(false);
+                // Trigger refresh if needed, for now we rely on Supabase realtime or simple page reload
+                // Since 'patient' prop comes from parent, we might need a refresh callback
+                alert("Vitals updated! Please refresh to see changes.");
+            }}
+            darkMode={darkMode}
+        />
+      )}
     </div>
   );
 }
@@ -315,6 +344,13 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
 
   const handleSubmit = async () => {
     if (selectedDrug && dose) {
+      // If severe interaction, confirm with user
+      if (alert?.type === 'danger') {
+        if (!confirm('تنبيه: يوجد تعارض دوائي خطير! هل أنت متأكد من رغبتك في إضافة هذا الدواء على مسؤوليتك؟')) {
+          return;
+        }
+      }
+
       const { error } = await supabase.from('patient_medications').insert({
         patient_id: patientId,
         drug_name: selectedDrug.trade_name,
@@ -453,10 +489,14 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
           }`}>إلغاء</button>
           <button
             onClick={handleSubmit}
-            disabled={alert?.type === 'danger' || !dose || checking}
-            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-600/20"
+            disabled={!dose || checking}
+            className={`px-6 py-2.5 text-white rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg ${
+              alert?.type === 'danger'
+                ? 'bg-red-600 hover:bg-red-700 shadow-red-600/20'
+                : 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20'
+            }`}
           >
-            تأكيد الإضافة
+            {alert?.type === 'danger' ? 'تجاهل وإضافة' : 'تأكيد الإضافة'}
           </button>
         </div>
       </div>
