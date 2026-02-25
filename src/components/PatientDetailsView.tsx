@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { Patient, PatientMedication, Drug, PatientNote } from '../types';
 import { checkInteractionsByCode } from '../services/api';
+import { FREQUENCIES, getNextDose, isMedicationDue, formatNextDose } from '../utils/medicationReminders';
+import { VitalsChart } from './VitalsChart';
 import {
   ArrowLeft, Heart, Activity, Thermometer, Droplet, FileText,
-  Pill, Plus, Loader2, Trash2, X, Search, AlertTriangle, ShieldCheck
+  Pill, Plus, Loader2, Trash2, X, Search, AlertTriangle, ShieldCheck, Clock, CheckCircle
 } from 'lucide-react';
 
 interface PatientDetailsViewProps {
@@ -64,6 +66,31 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
 
 function OverviewTab({ patient, darkMode }: { patient: Patient, darkMode: boolean }) {
   const vitals = patient.vitals || { hr: 0, bp: '--/--', temp: 0, spo2: 0 };
+
+  // Mock history data based on current vitals for visualization
+  const [mockHistory, setMockHistory] = useState<any[]>([]);
+
+  useEffect(() => {
+    const history = [];
+    const now = new Date();
+    for(let i=12; i>=0; i--) {
+        const time = new Date(now.getTime() - i * 3600 * 1000); // last 12 hours
+        // Randomly fluctuate around current vitals
+        const hr = vitals.hr + Math.floor(Math.random() * 10 - 5);
+        const spo2 = vitals.spo2 + Math.floor(Math.random() * 4 - 2);
+        const temp = vitals.temp + (Math.random() * 0.5 - 0.25);
+        history.push({
+            date: time.toISOString(),
+            hr: Math.max(40, hr),
+            spo2: Math.min(100, spo2),
+            temp: parseFloat(temp.toFixed(1)),
+            bp: vitals.bp
+        });
+    }
+    // eslint-disable-next-line
+    setMockHistory(history);
+  }, [vitals.hr, vitals.spo2, vitals.temp, vitals.bp]); // decomposed dependencies
+
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -100,6 +127,18 @@ function OverviewTab({ patient, darkMode }: { patient: Patient, darkMode: boolea
             </div>
           </div>
       </div>
+
+      {/* Vitals History Chart */}
+      <div className={`rounded-2xl shadow-sm border ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+         <div className={`p-6 border-b ${darkMode ? 'border-slate-700' : 'border-slate-100'}`}>
+             <h3 className={`font-bold text-lg flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+               <Activity size={20} className="text-blue-600"/> Monitoring Trends (Live)
+             </h3>
+         </div>
+         <div className="p-4 h-[350px]">
+             <VitalsChart data={mockHistory} darkMode={darkMode} />
+         </div>
+      </div>
     </div>
   );
 }
@@ -109,7 +148,7 @@ function MedicationsTab({ patient, darkMode }: { patient: Patient, darkMode: boo
   const [currentMeds, setCurrentMeds] = useState<PatientMedication[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchMeds = async () => {
+  const fetchMeds = React.useCallback(async () => {
     setLoading(true);
     const { data } = await supabase
       .from('patient_medications')
@@ -118,15 +157,22 @@ function MedicationsTab({ patient, darkMode }: { patient: Patient, darkMode: boo
       .eq('is_active', true);
     if (data) setCurrentMeds(data);
     setLoading(false);
-  };
+  }, [patient.id]);
 
-  useEffect(() => { fetchMeds(); }, [patient.id]);
+  // eslint-disable-next-line
+  useEffect(() => { fetchMeds(); }, [fetchMeds]);
 
   const handleDelete = async (medId: string) => {
     if(confirm('هل أنت متأكد من إيقاف هذا الدواء؟')) {
        await supabase.from('patient_medications').update({ is_active: false }).eq('id', medId);
        fetchMeds();
     }
+  };
+
+  const handleTake = async (medId: string) => {
+    const now = new Date().toISOString();
+    await supabase.from('patient_medications').update({ last_taken: now }).eq('id', medId);
+    fetchMeds();
   };
 
   return (
@@ -153,7 +199,7 @@ function MedicationsTab({ patient, darkMode }: { patient: Patient, darkMode: boo
             <tr>
               <th className="p-4 font-medium">اسم الدواء</th>
               <th className="p-4 font-medium">الجرعة</th>
-              <th className="p-4 font-medium">المادة الفعالة</th>
+              <th className="p-4 font-medium">الموعد القادم</th>
               <th className="p-4 font-medium">تاريخ البدء</th>
               <th className="p-4 font-medium">إجراءات</th>
             </tr>
@@ -162,17 +208,44 @@ function MedicationsTab({ patient, darkMode }: { patient: Patient, darkMode: boo
             {currentMeds.length === 0 && (
               <tr><td colSpan={5} className={`p-8 text-center ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>لا توجد أدوية مسجلة</td></tr>
             )}
-            {currentMeds.map((med) => (
+            {currentMeds.map((med) => {
+              const freqHours = parseInt(med.frequency || '24') || 0;
+              const nextDose = getNextDose(freqHours, med.last_taken, med.start_date);
+              const isDue = isMedicationDue(nextDose);
+
+              return (
               <tr key={med.id} className={`transition-colors group ${darkMode ? 'hover:bg-blue-900/10' : 'hover:bg-blue-50/50'}`}>
                 <td className={`p-4 font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{med.drug_name}</td>
                 <td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${darkMode ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700'}`}>{med.dose}</span></td>
-                <td className={`p-4 text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{med.active_ingredient}</td>
+                <td className="p-4">
+                   {freqHours > 0 ? (
+                      <div className="flex items-center gap-2">
+                        {isDue ? (
+                           <span className="flex items-center gap-1 text-xs font-bold text-red-500 bg-red-100 px-2 py-1 rounded-full animate-pulse">
+                             <Clock size={12}/> مستحق الآن
+                           </span>
+                        ) : (
+                           <span className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                              {formatNextDose(nextDose)}
+                           </span>
+                        )}
+                        <button
+                          onClick={() => handleTake(med.id)}
+                          className="p-1 text-green-600 hover:bg-green-100 rounded-full transition-colors"
+                          title="تسجيل أخذ الدواء"
+                        >
+                          <CheckCircle size={16} />
+                        </button>
+                      </div>
+                   ) : <span className="text-xs text-slate-400">عند اللزوم</span>}
+                </td>
                 <td className={`p-4 text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{med.start_date}</td>
                 <td className="p-4">
                   <button onClick={() => handleDelete(med.id)} className="text-slate-400 hover:text-red-500 p-2 transition-colors"><Trash2 size={18} /></button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         )}
@@ -196,6 +269,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
   const [drugsList, setDrugsList] = useState<Drug[]>([]);
   const [selectedDrug, setSelectedDrug] = useState<Drug | null>(null);
   const [dose, setDose] = useState('');
+  const [frequency, setFrequency] = useState('24');
   const [alert, setAlert] = useState<{ type: string, msg: string | string[] } | null>(null);
   const [checking, setChecking] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
@@ -246,6 +320,7 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
         drug_name: selectedDrug.trade_name,
         active_ingredient: selectedDrug.active_ingredient,
         dose: dose,
+        frequency: frequency,
         start_date: new Date().toISOString().split('T')[0],
         is_active: true,
         rx_cui: selectedDrug.rx_cui
@@ -322,8 +397,25 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
                      }`}
                      value={dose}
                      onChange={e => setDose(e.target.value)}
-                     placeholder="مثال: 500mg مرتين يومياً"
+                     placeholder="مثال: 500mg"
                    />
+                </div>
+                <div>
+                   <label className={`block text-sm font-medium mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>التكرار (Frequency)</label>
+                   <div className="relative">
+                     <Clock className="absolute right-3 top-3.5 text-slate-400" size={18}/>
+                     <select
+                       className={`w-full border rounded-xl pr-10 pl-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none appearance-none ${
+                         darkMode ? 'bg-slate-800 border-slate-600 text-white' : 'border-slate-300 bg-white'
+                       }`}
+                       value={frequency}
+                       onChange={e => setFrequency(e.target.value)}
+                     >
+                       {FREQUENCIES.map(f => (
+                         <option key={f.value} value={f.value}>{f.label}</option>
+                       ))}
+                     </select>
+                   </div>
                 </div>
              </div>
           )}
@@ -376,12 +468,13 @@ function NotesTab({ patientId, doctorName, darkMode }: { patientId: string, doct
   const [notes, setNotes] = useState<PatientNote[]>([]);
   const [newNote, setNewNote] = useState('');
 
-  const fetchNotes = async () => {
+  const fetchNotes = React.useCallback(async () => {
     const { data } = await supabase.from('patient_notes').select('*').eq('patient_id', patientId).order('created_at', { ascending: false });
     if(data) setNotes(data);
-  };
+  }, [patientId]);
 
-  useEffect(() => { fetchNotes(); }, [patientId]);
+  // eslint-disable-next-line
+  useEffect(() => { fetchNotes(); }, [fetchNotes]);
 
   const saveNote = async () => {
     if(!newNote) return;

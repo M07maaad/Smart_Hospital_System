@@ -7,45 +7,43 @@ The Smart Hospital System is a React application built with Vite and Supabase. I
 
 ### 1. Security: Plaintext Password Storage
 **Severity:** Critical
-**Description:** The application currently checks passwords by querying the `doctors` table directly with the provided password string (`.eq('password', pass)`). This implies passwords are stored in plain text or are being compared on the client-side.
+**Description:** The application currently checks passwords by querying the `doctors` table directly with the provided password string (`.eq('password', pass)`).
+**Status:** **Unresolved**. For production, switching to Supabase Auth is mandatory.
 **Recommendation:**
-- Use **Supabase Auth** (GoTrue) for user authentication instead of a custom table.
-- If a custom table is necessary, store only hashed passwords (e.g., using bcrypt) and verify them using a secure server-side function (Postgres function or Edge Function). Never query for a password match from the client.
+- Use **Supabase Auth** (GoTrue) for user authentication.
+- Disable client-side queries to the `doctors` table for authentication.
 
-### 2. Scalability: Large Component Files
+### 2. Scalability
 **Severity:** Moderate
-**Description:** `App.tsx` contained all application logic and UI components.
-**Resolution:** This has been addressed by refactoring the code into `src/components/`, `src/types/`, and `src/services/`.
-
-### 3. Error Handling: Basic Alerts
-**Severity:** Low
-**Description:** Errors are shown using `alert()`, which provides a poor user experience.
-**Recommendation:** Implement a toast notification system (e.g., `react-hot-toast` or `sonner`) for better feedback.
+**Status:** **Resolved**. Codebase refactored into modular components (`src/components`, `src/services`, `src/types`).
 
 ## Suggested New Features
 
 ### 1. Dashboard Enhancements (Implemented)
-- **Search & Filter:** Added ability to search patients by name/diagnosis and filter by status.
+- **Search & Filter:** Added ability to search patients and filter by status.
+- **Medication Alerts:** Added visual indicators for overdue medications.
 
 ### 2. Dark Mode (Implemented)
-- **Theme Toggle:** Added a dark mode toggle to the sidebar for better usability in low-light environments.
+- **Theme Toggle:** Fully implemented dark mode support.
 
-### 3. Vitals Visualization
-- **Charts:** Integrate a charting library like `recharts` to show vital signs trends over time instead of just current values.
+### 3. Vitals Visualization (Implemented)
+- **Charts:** Added `recharts` integration to visualize vital signs trends (currently using mocked history data).
 
-### 4. Lab Results Integration
-- **Lab Module:** Create a section to view and upload lab reports (PDFs or structured data).
+### 4. Drug Time Reminders (Implemented)
+- **Scheduling:** Added frequency selection (e.g., Every 8h, 24h).
+- **Reminders:** "Next Dose" calculation and "Take Now" functionality.
+- **Notifications:** Visual alerts on Dashboard and Patient Details.
 
-### 5. Appointment Scheduling
-- **Calendar:** Add a calendar view for scheduling follow-ups and procedures.
+### 5. Lab Results Integration (Planned)
+- **Lab Module:** Create a section to view and upload lab reports.
 
-### 6. Notifications
-- **Real-time Alerts:** Use Supabase Realtime to push notifications for critical patient updates (e.g., sudden drop in vitals).
+### 6. Appointment Scheduling (Planned)
+- **Calendar:** Add a calendar view for scheduling follow-ups.
 
-### 7. Localization (i18n)
-- **English Support:** The app is currently hardcoded in Arabic. Using `react-i18next` would allow switching between Arabic and English.
+### 7. Localization (Planned)
+- **English Support:** Support switching between Arabic and English.
 
 ## Technical Improvements
 
-- **State Management:** As the app grows, consider using `Zustand` or `TanStack Query` for better state and data fetching management.
-- **Form Validation:** Use `react-hook-form` and `zod` for robust form handling and validation.
+- **State Management:** Consider `TanStack Query` for better caching.
+- **Testing:** Add comprehensive E2E tests with Playwright.

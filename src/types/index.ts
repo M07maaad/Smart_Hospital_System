@@ -20,6 +20,13 @@ export interface Patient {
   status: 'Stable' | 'Critical' | 'Improving';
   medical_history: string[];
   vitals: { hr: number; bp: string; temp: number; spo2: number };
+  vitals_history?: {
+    date: string;
+    hr: number;
+    bp: string;
+    temp: number;
+    spo2: number;
+  }[];
 }
 
 export interface PatientMedication {
@@ -31,6 +38,8 @@ export interface PatientMedication {
   active_ingredient: string;
   is_active: boolean;
   rx_cui?: string;
+  frequency?: string; // e.g., "Every 8 hours", "Once daily", "Twice daily"
+  last_taken?: string; // ISO timestamp
 }
 
 export interface PatientNote {

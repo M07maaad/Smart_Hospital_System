@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { Patient } from '../types';
-import { Loader2, Stethoscope, ChevronRight, Search, Filter } from 'lucide-react';
+import { getNextDose, isMedicationDue } from '../utils/medicationReminders';
+import { Loader2, Stethoscope, ChevronRight, Search, Filter, Clock } from 'lucide-react';
 
 interface DashboardViewProps {
   onSelectPatient: (p: Patient) => void;
@@ -10,24 +11,40 @@ interface DashboardViewProps {
 
 export function DashboardView({ onSelectPatient, darkMode = false }: DashboardViewProps) {
   const [patients, setPatients] = useState<Patient[]>([]);
-  const [filteredPatients, setFilteredPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
+  const [medAlerts, setMedAlerts] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    const fetchPatients = async () => {
+    const fetchData = async () => {
+      setLoading(true);
       const { data } = await supabase.from('patients').select('*');
       if (data) {
         setPatients(data);
-        setFilteredPatients(data);
+      }
+
+      const { data: meds } = await supabase.from('patient_medications').select('*').eq('is_active', true);
+      if (meds) {
+        const alerts: Record<string, boolean> = {};
+        meds.forEach(m => {
+          const freq = parseInt(m.frequency || '24') || 0;
+          if (freq > 0) {
+            const next = getNextDose(freq, m.last_taken, m.start_date);
+            if (isMedicationDue(next)) {
+              alerts[m.patient_id] = true;
+            }
+          }
+        });
+        setMedAlerts(alerts);
       }
       setLoading(false);
     };
-    fetchPatients();
+
+    fetchData();
   }, []);
 
-  useEffect(() => {
+  const filteredPatients = React.useMemo(() => {
     let result = patients;
 
     if (searchTerm) {
@@ -42,9 +59,8 @@ export function DashboardView({ onSelectPatient, darkMode = false }: DashboardVi
     if (statusFilter !== 'All') {
       result = result.filter(p => p.status === statusFilter);
     }
-
-    setFilteredPatients(result);
-  }, [searchTerm, statusFilter, patients]);
+    return result;
+  }, [patients, searchTerm, statusFilter]);
 
   if (loading) return <div className="h-full flex items-center justify-center"><Loader2 className="animate-spin text-blue-600 w-10 h-10" /></div>;
 
@@ -110,12 +126,19 @@ export function DashboardView({ onSelectPatient, darkMode = false }: DashboardVi
           <div
             key={patient.id}
             onClick={() => onSelectPatient(patient)}
-            className={`rounded-2xl shadow-sm border p-5 cursor-pointer transition-all group hover:shadow-md hover:border-blue-400 ${
+            className={`relative rounded-2xl shadow-sm border p-5 cursor-pointer transition-all group hover:shadow-md hover:border-blue-400 ${
                 darkMode
                 ? 'bg-slate-800 border-slate-700 hover:bg-slate-750'
                 : 'bg-white border-slate-200 hover:bg-white'
             }`}
           >
+            {medAlerts[patient.id] && (
+              <div className="absolute top-4 left-4 z-10 animate-bounce">
+                <div className="bg-red-500 text-white p-1.5 rounded-full shadow-lg shadow-red-500/30 flex items-center justify-center" title="Medication Due Now">
+                  <Clock size={16} className="animate-pulse" />
+                </div>
+              </div>
+            )}
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-3">
                 <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg ${
