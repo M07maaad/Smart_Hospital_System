@@ -3,11 +3,13 @@ import { supabase } from './lib/supabase';
 import { LoginView } from './components/LoginView';
 import { DashboardView } from './components/DashboardView';
 import { PatientDetailsView } from './components/PatientDetailsView';
+import { PharmacyView } from './components/PharmacyView';
+import { DischargeView } from './components/DischargeView';
 import { Sidebar } from './components/Sidebar';
 import { Patient } from './types';
 
 export default function SmartHospitalApp() {
-  const [view, setView] = useState<'login' | 'dashboard' | 'patient'>('login');
+  const [view, setView] = useState<'login' | 'dashboard' | 'patient' | 'pharmacy' | 'discharge'>('login');
   const [user, setUser] = useState<{ id: string, name: string } | null>(null);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
 
@@ -80,6 +82,9 @@ export default function SmartHospitalApp() {
                 darkMode={darkMode}
               />
             )}
+
+            {view === 'pharmacy' && <PharmacyView darkMode={darkMode} />}
+            {view === 'discharge' && <DischargeView darkMode={darkMode} />}
           </main>
         </div>
       )}

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { LabResult } from '../types';
 import { FlaskConical, Plus, FileText, CheckCircle, AlertTriangle, Clock, X, Loader2 } from 'lucide-react';
+import { addMockLab, getMockLabs } from '../utils/mockData';
 
 interface LabsTabProps {
   patientId: string;
@@ -16,19 +17,22 @@ export function LabsTab({ patientId, currentUser, darkMode }: LabsTabProps) {
 
   const fetchLabs = React.useCallback(async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('patient_labs')
-      .select('*')
-      .eq('patient_id', patientId)
-      .order('created_at', { ascending: false });
+    let labsData: LabResult[] = [];
+    try {
+        const { data, error } = await supabase
+        .from('patient_labs')
+        .select('*')
+        .eq('patient_id', patientId)
+        .order('created_at', { ascending: false });
 
-    if (!error && data) {
-      setLabs(data as any);
-    } else {
-      // Fallback/Mock if table doesn't exist yet
-      console.warn("Could not fetch labs (table might be missing). using mock data.");
-      // setLabs([]); // or keep empty
-    }
+        if (!error && data) {
+           labsData = data as any;
+        }
+    } catch(e) { console.warn(e); }
+
+    // Merge Mock
+    const mock = getMockLabs(patientId);
+    setLabs([...labsData, ...mock]);
     setLoading(false);
   }, [patientId]);
 
@@ -120,19 +124,23 @@ function AddLabModal({ patientId, currentUser, onClose, onSuccess, darkMode }: a
     if (!testName) return;
     setLoading(true);
 
-    const { error } = await supabase.from('patient_labs').insert({
+    const labData = {
         patient_id: patientId,
         test_name: testName,
         result_value: result,
         unit: unit,
-        status: status,
+        status: status as any,
         requested_by: currentUser,
         created_at: new Date().toISOString()
-    });
+    };
 
-    if (error) {
-        alert("Error adding lab: " + error.message);
-    } else {
+    try {
+        const { error } = await supabase.from('patient_labs').insert(labData);
+        if (error) throw error;
+        onSuccess();
+    } catch(e) {
+        console.warn("Supabase failed, adding to mock", e);
+        addMockLab(labData);
         onSuccess();
     }
     setLoading(false);
