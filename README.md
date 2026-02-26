@@ -12,6 +12,11 @@ A modern, responsive Hospital Management System built with React, Vite, and Supa
   - **New:** Visual Alerts for overdue medications.
 - **Vitals Monitoring:**
   - **New:** Live Vitals Chart (Mocked history based on current vitals).
+- **Nurse Station:**
+  - **New:** Fluid Balance Sheet (Intake/Output tracking).
+  - **New:** Clinical Tasks Management.
+- **Smart Assistant:**
+  - **New:** Floating AI Assistant for clinical queries.
 - **Dark Mode:** Fully supported dark theme.
 - **Responsive Design:** Mobile-friendly interface.
 

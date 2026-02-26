@@ -6,9 +6,12 @@ import { FREQUENCIES, getNextDose, isMedicationDue, formatNextDose } from '../ut
 import { VitalsChart } from './VitalsChart';
 import { LabsTab } from './LabsTab';
 import { VitalsEntryModal } from './VitalsEntryModal';
+import { SmartAssistant } from './SmartAssistant';
+import { FluidBalanceTab } from './FluidBalanceTab';
+import { TasksTab } from './TasksTab';
 import {
   ArrowLeft, Heart, Activity, Thermometer, Droplet, FileText,
-  Pill, Plus, Loader2, Trash2, X, Search, AlertTriangle, ShieldCheck, Clock, CheckCircle
+  Pill, Plus, Loader2, Trash2, X, Search, AlertTriangle, ShieldCheck, Clock, CheckCircle, Bot
 } from 'lucide-react';
 
 interface PatientDetailsViewProps {
@@ -19,7 +22,8 @@ interface PatientDetailsViewProps {
 }
 
 export function PatientDetailsView({ patient, currentUser, onBack, darkMode = false }: PatientDetailsViewProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'meds' | 'notes' | 'labs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'meds' | 'notes' | 'labs' | 'fluid' | 'tasks'>('overview');
+  const [showAssistant, setShowAssistant] = useState(false);
 
   return (
     <div className={`flex flex-col h-full ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
@@ -53,6 +57,8 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
         <TabButton label="الأدوية والخطة العلاجية" active={activeTab === 'meds'} onClick={() => setActiveTab('meds')} darkMode={darkMode} />
         <TabButton label="المتابعة والملاحظات" active={activeTab === 'notes'} onClick={() => setActiveTab('notes')} darkMode={darkMode} />
         <TabButton label="Labs & Reports" active={activeTab === 'labs'} onClick={() => setActiveTab('labs')} darkMode={darkMode} />
+        <TabButton label="Fluid Balance" active={activeTab === 'fluid'} onClick={() => setActiveTab('fluid')} darkMode={darkMode} />
+        <TabButton label="Tasks" active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} darkMode={darkMode} />
       </div>
 
       {/* Content */}
@@ -62,8 +68,32 @@ export function PatientDetailsView({ patient, currentUser, onBack, darkMode = fa
           {activeTab === 'meds' && <MedicationsTab patient={patient} darkMode={darkMode} />}
           {activeTab === 'notes' && <NotesTab patientId={patient.id} doctorName={currentUser} darkMode={darkMode} />}
           {activeTab === 'labs' && <LabsTab patientId={patient.id} currentUser={currentUser} darkMode={darkMode} />}
+          {activeTab === 'fluid' && <FluidBalanceTab patientId={patient.id} darkMode={darkMode} />}
+          {activeTab === 'tasks' && <TasksTab patientId={patient.id} darkMode={darkMode} />}
         </div>
       </div>
+
+      {showAssistant && (
+        <SmartAssistant
+            patient={patient}
+            isOpen={showAssistant}
+            onClose={() => setShowAssistant(false)}
+            darkMode={darkMode}
+        />
+      )}
+
+      {/* Floating Smart Assistant Button */}
+      {!showAssistant && (
+      <div className="fixed bottom-6 right-6 z-50 animate-in zoom-in">
+        <button
+          onClick={() => setShowAssistant(true)}
+          className="p-4 rounded-full shadow-2xl transition-all hover:scale-110 active:scale-95 bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/30"
+          title="Smart Assistant"
+        >
+           <Bot size={28} className="text-white" />
+        </button>
+      </div>
+      )}
     </div>
   );
 }
@@ -346,27 +376,35 @@ function AddMedicationModal({ patientId, existingMeds, onClose, onSuccess, darkM
     if (selectedDrug && dose) {
       // If severe interaction, confirm with user
       if (alert?.type === 'danger') {
-        if (!confirm('تنبيه: يوجد تعارض دوائي خطير! هل أنت متأكد من رغبتك في إضافة هذا الدواء على مسؤوليتك؟')) {
+        if (!window.confirm('تنبيه: يوجد تعارض دوائي خطير! هل أنت متأكد من رغبتك في إضافة هذا الدواء على مسؤوليتك؟')) {
           return;
         }
       }
 
-      const { error } = await supabase.from('patient_medications').insert({
-        patient_id: patientId,
-        drug_name: selectedDrug.trade_name,
-        active_ingredient: selectedDrug.active_ingredient,
-        dose: dose,
-        frequency: frequency,
-        start_date: new Date().toISOString().split('T')[0],
-        is_active: true,
-        rx_cui: selectedDrug.rx_cui
-      });
+      try {
+        const { error } = await supabase.from('patient_medications').insert({
+          patient_id: patientId,
+          drug_name: selectedDrug.trade_name,
+          active_ingredient: selectedDrug.active_ingredient,
+          dose: dose,
+          frequency: frequency,
+          start_date: new Date().toISOString().split('T')[0],
+          is_active: true,
+          rx_cui: selectedDrug.rx_cui
+        });
 
-      if (error) {
-        alert("فشل في إضافة الدواء: " + error.message);
-      } else {
-        onSuccess();
+        if (error) {
+          console.error("Supabase Error:", error);
+          alert("فشل في إضافة الدواء: " + error.message);
+        } else {
+          onSuccess();
+        }
+      } catch (err: any) {
+        console.error("Catch Error:", err);
+        alert("حدث خطأ غير متوقع: " + (err.message || String(err)));
       }
+    } else {
+      alert("الرجاء اختيار الدواء وتحديد الجرعة.");
     }
   };
 
